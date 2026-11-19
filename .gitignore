@@ -1,0 +1,21 @@
+# Rust
+/target
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Environment / secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+
+# Node / browser runner
+node_modules/
+dist/
