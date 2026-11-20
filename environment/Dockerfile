@@ -53,4 +53,14 @@ RUN mkdir -p /root/.config/Mesen2 \
 ENV SDL_VIDEODRIVER=dummy
 ENV SDL_AUDIODRIVER=dummy
 
+# NOTE — GBA BIOS (not vendored): Mesen needs the real Nintendo GBA BIOS
+# (`gba_bios.bin`, copyrighted firmware) to boot GBA ROMs. Provide it by
+# mounting it into the firmware folder at runtime, e.g.:
+#   docker run --rm \
+#     -v "$PWD/gba_bios.bin:/root/.config/Mesen2/Firmware/gba_bios.bin" \
+#     gba-eval python3 /work/grader/score.py /work/roms/fill_red.gba \
+#       --oracle-backend mesen2 --candidate /work/emulator/target/release/gba-run
+# The dev ROMs also embed the Nintendo logo in their header (see
+# grader/roms/build_roms.py) — verify it against a known-good homebrew ROM.
+
 CMD ["/bin/bash"]

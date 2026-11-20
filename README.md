@@ -31,6 +31,32 @@ Working end-to-end on the golden path: CPU → PPU → frames → SSIM grading a
     # 4. browser demo (live emulator + interactive debugger)
     open https://gba-eval.vercel.app
 
+## Grading against Mesen (the real oracle)
+
+The golden path (above) grades against a *known-correct* reference. To grade
+against the real **Mesen/MesenCE** oracle, the wiring is complete and verified;
+it needs only two user-supplied pieces (both are Nintendo's copyrighted data,
+so they're never vendored in this repo):
+
+1. **A GBA BIOS** (`gba_bios.bin`) — Mesen needs the real BIOS firmware to
+   boot GBA ROMs. Mount it into the firmware folder (see below).
+2. **The Nintendo logo** in the dev-ROM header (`grader/roms/build_roms.py`)
+   should be diffed against a known-good homebrew ROM before relying on boot.
+
+    # build the sandbox (MesenCE 2.2.1 + Linux candidate + grader)
+    docker build -t gba-eval -f environment/Dockerfile .
+
+    # grade the candidate against Mesen (mount the BIOS)
+    docker run --rm \
+      -v "$PWD/gba_bios.bin:/root/.config/Mesen2/Firmware/gba_bios.bin" \
+      gba-eval python3 /work/grader/score.py \
+        /work/roms/fill_red.gba --oracle-backend mesen2 \
+        --candidate /work/emulator/target/release/gba-run
+
+The Mesen invocation is fully reverse-engineered and verified against MesenCE
+2.2.1 (arg format, the `io`/`os` config gate, the callback API, framebuffer
+capture, exit codes) — see the header comments in `grader/mesen2_capture.lua`.
+
 ## Docs
 
 - `docs/ARCHITECTURE.md` — system shape + components + data model + honesty boundary.
