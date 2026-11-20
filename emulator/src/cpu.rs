@@ -4,6 +4,8 @@
 //! ARM condition-code evaluation. Instruction decoding/execution is added
 //! incrementally in follow-on commits.
 
+use crate::memory::Memory;
+
 /// The 16 general-purpose registers (r0..r15). r15 is the program counter.
 #[derive(Default, Clone)]
 pub struct RegisterFile {
@@ -296,7 +298,7 @@ impl Arm7tdmi {
     }
 
     /// Execute a single ARM instruction, returning the cycles consumed.
-    pub fn step_arm(&mut self, instr: u32) -> u32 {
+    pub fn step_arm(&mut self, mem: &mut Memory, instr: u32) -> u32 {
         let cond = Cond::from_bits(instr >> 28);
         if !condition_passes(cond, self.cpsr.flags) {
             // Predicated false — ARM still consumes one S-cycle.
@@ -304,12 +306,70 @@ impl Arm7tdmi {
         }
         match (instr >> 25) & 0x7 {
             0b000 | 0b001 => self.exec_data_processing_class(instr),
+            0b010 | 0b011 => self.exec_single_data_transfer(mem, instr), // LDR/STR/LDRB/STRB
             0b101 => self.exec_branch(instr),
-            // 0b010/0b011 (load/store), 0b100 (LDM/STM), 0b110/0b111 (SWI/coprocessor):
-            // Phase 2+ (memory).
+            // 0b100 (LDM/STM), 0b110/0b111 (SWI/coprocessor): later phases.
             _ => {}
         }
         1
+    }
+
+    fn exec_single_data_transfer(&mut self, mem: &mut Memory, instr: u32) {
+        let i = (instr >> 25) & 1;
+        let p = (instr >> 24) & 1;
+        let u = (instr >> 23) & 1;
+        let b = (instr >> 22) & 1;
+        let w = (instr >> 21) & 1;
+        let l = (instr >> 20) & 1;
+        let rn = ((instr >> 16) & 0xF) as usize;
+        let rd = ((instr >> 12) & 0xF) as usize;
+
+        let base = self.regs.r[rn];
+        let offset = if i == 1 {
+            instr & 0xFFF
+        } else {
+            let (val, _) = shift_amount(
+                self.regs.r[(instr & 0xF) as usize],
+                (instr >> 5) & 0x3,
+                (instr >> 7) & 0x1F,
+                self.cpsr.c(),
+            );
+            val
+        };
+        let writeback_addr = if u == 1 {
+            base.wrapping_add(offset)
+        } else {
+            base.wrapping_sub(offset)
+        };
+        let access_addr = if p == 1 { writeback_addr } else { base };
+
+        if l == 1 {
+            let value = if b == 1 {
+                mem.read8(access_addr) as u32
+            } else {
+                mem.read32(access_addr)
+            };
+            if rd == 15 {
+                self.regs.set_pc(value & 0xFFFF_FFFC);
+            } else {
+                self.regs.r[rd] = value;
+            }
+        } else if rd == 15 {
+            let value = self.regs.pc() + 4;
+            if b == 1 {
+                mem.write8(access_addr, value as u8);
+            } else {
+                mem.write32(access_addr, value);
+            }
+        } else if b == 1 {
+            mem.write8(access_addr, self.regs.r[rd] as u8);
+        } else {
+            mem.write32(access_addr, self.regs.r[rd]);
+        }
+
+        if p == 0 || w == 1 {
+            self.regs.r[rn] = writeback_addr;
+        }
     }
 
     fn exec_data_processing_class(&mut self, instr: u32) {
@@ -478,7 +538,7 @@ impl Arm7tdmi {
     }
 
     /// Execute a single Thumb (16-bit) instruction, returning the cycles consumed.
-    pub fn step_thumb(&mut self, instr: u16) -> u32 {
+    pub fn step_thumb(&mut self, mem: &mut Memory, instr: u16) -> u32 {
         let instr = instr as u32;
         match (instr >> 11) & 0x1F {
             0x00..=0x02 => self.thumb_move_shifted(instr),
@@ -491,19 +551,83 @@ impl Arm7tdmi {
                     self.thumb_hi_reg(instr);
                 }
             }
+            0x09 => self.thumb_pc_load(mem, instr),
+            0x0A..=0x0B => {
+                if (instr >> 9) & 1 == 0 {
+                    self.thumb_load_store_reg(mem, instr);
+                }
+                // else: format 8 (halfword/signed) — later.
+            }
+            0x0C..=0x0F => self.thumb_load_store_imm(mem, instr),
+            0x12..=0x13 => self.thumb_load_store_sp(mem, instr),
             0x14..=0x15 => self.thumb_load_address(instr),
             0x16 => {
                 if (instr >> 10) & 1 == 0 {
-                    self.thumb_add_sp(instr); // else PUSH/POP — Phase 2
+                    self.thumb_add_sp(instr); // else PUSH/POP — later
                 }
             }
             0x1A..=0x1B => self.thumb_cond_branch(instr),
             0x1C..=0x1D => self.thumb_branch(instr),
-            // 0x09 (PC load), 0x0A..0x0F (load/store), 0x10..0x13 (halfword),
-            // 0x18..0x19 (LDM/STM), 0x1E..0x1F (BL): deferred to Phase 2 (memory).
+            // 0x10..0x11 (halfword immediate), 0x18..0x19 (LDM/STM),
+            // 0x1E..0x1F (BL): later.
             _ => {}
         }
         1
+    }
+
+    /// Format 6: PC-relative load (`01001 Rd word8`).
+    fn thumb_pc_load(&mut self, mem: &mut Memory, instr: u32) {
+        let rd = ((instr >> 8) & 0x7) as usize;
+        let addr = (self.regs.pc() & 0xFFFF_FFFC).wrapping_add((instr & 0xFF) << 2);
+        self.regs.r[rd] = mem.read32(addr);
+    }
+
+    /// Format 7: load/store with register offset (`0101 L B 0 Ro Rb Rd`).
+    fn thumb_load_store_reg(&mut self, mem: &mut Memory, instr: u32) {
+        let l = (instr >> 11) & 1;
+        let b = (instr >> 10) & 1;
+        let addr = self.regs.r[((instr >> 3) & 0x7) as usize]
+            .wrapping_add(self.regs.r[((instr >> 6) & 0x7) as usize]);
+        let rd = (instr & 0x7) as usize;
+        if l == 1 {
+            self.regs.r[rd] = if b == 1 { mem.read8(addr) as u32 } else { mem.read32(addr) };
+        } else if b == 1 {
+            mem.write8(addr, self.regs.r[rd] as u8);
+        } else {
+            mem.write32(addr, self.regs.r[rd]);
+        }
+    }
+
+    /// Format 9: load/store with immediate offset (`011 B L offset5 Rb Rd`).
+    fn thumb_load_store_imm(&mut self, mem: &mut Memory, instr: u32) {
+        let b = (instr >> 12) & 1;
+        let l = (instr >> 11) & 1;
+        let offset = if b == 1 {
+            (instr >> 6) & 0x1F
+        } else {
+            ((instr >> 6) & 0x1F) << 2
+        };
+        let addr = self.regs.r[((instr >> 3) & 0x7) as usize].wrapping_add(offset);
+        let rd = (instr & 0x7) as usize;
+        if l == 1 {
+            self.regs.r[rd] = if b == 1 { mem.read8(addr) as u32 } else { mem.read32(addr) };
+        } else if b == 1 {
+            mem.write8(addr, self.regs.r[rd] as u8);
+        } else {
+            mem.write32(addr, self.regs.r[rd]);
+        }
+    }
+
+    /// Format 11: SP-relative load/store (`1001 L Rd word8`).
+    fn thumb_load_store_sp(&mut self, mem: &mut Memory, instr: u32) {
+        let l = (instr >> 11) & 1;
+        let rd = ((instr >> 8) & 0x7) as usize;
+        let addr = self.regs.r[13].wrapping_add((instr & 0xFF) << 2);
+        if l == 1 {
+            self.regs.r[rd] = mem.read32(addr);
+        } else {
+            mem.write32(addr, self.regs.r[rd]);
+        }
     }
 
     /// Format 1: move shifted register (`000 op imm5 Rs Rd`).
@@ -665,6 +789,7 @@ impl Arm7tdmi {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::Memory;
 
     #[test]
     fn condition_codes_match_arm_semantics() {
@@ -700,9 +825,10 @@ mod tests {
     #[test]
     fn add_sets_flags() {
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 5;
         cpu.regs.r[2] = 3;
-        cpu.step_arm(dp(DP_ADD, true, 1, 0, 2));
+        cpu.step_arm(&mut mem, dp(DP_ADD, true, 1, 0, 2));
         assert_eq!(cpu.regs.r[0], 8);
         assert!(!cpu.cpsr.n() && !cpu.cpsr.z() && !cpu.cpsr.c() && !cpu.cpsr.v());
     }
@@ -710,9 +836,10 @@ mod tests {
     #[test]
     fn sub_borrow_sets_carry_clear() {
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 3;
         cpu.regs.r[2] = 5;
-        cpu.step_arm(dp(DP_SUB, true, 1, 0, 2));
+        cpu.step_arm(&mut mem, dp(DP_SUB, true, 1, 0, 2));
         assert_eq!(cpu.regs.r[0], 0xFFFF_FFFE); // 3 - 5 = -2
         assert!(cpu.cpsr.n() && !cpu.cpsr.z() && !cpu.cpsr.c());
     }
@@ -720,9 +847,10 @@ mod tests {
     #[test]
     fn sub_no_borrow_sets_carry() {
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 5;
         cpu.regs.r[2] = 3;
-        cpu.step_arm(dp(DP_SUB, true, 1, 0, 2));
+        cpu.step_arm(&mut mem, dp(DP_SUB, true, 1, 0, 2));
         assert_eq!(cpu.regs.r[0], 2);
         assert!(cpu.cpsr.c());
     }
@@ -730,10 +858,11 @@ mod tests {
     #[test]
     fn cmp_does_not_write_rd() {
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 5;
         cpu.regs.r[2] = 3;
         cpu.regs.r[0] = 0xDEAD_BEEF;
-        cpu.step_arm(dp(DP_CMP, false, 1, 0, 2)); // CMP r1, r2 (Rd untouched)
+        cpu.step_arm(&mut mem, dp(DP_CMP, false, 1, 0, 2)); // CMP r1, r2 (Rd untouched)
         assert_eq!(cpu.regs.r[0], 0xDEAD_BEEF);
         assert!(!cpu.cpsr.z());
     }
@@ -743,8 +872,9 @@ mod tests {
         // MOV r0, r1, LSL #4
         let instr = (0xE << 28) | (DP_MOV << 21) | (0 << 12) | (SH_LSL << 5) | (4 << 7) | 1;
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 0x0000_0001;
-        cpu.step_arm(instr);
+        cpu.step_arm(&mut mem, instr);
         assert_eq!(cpu.regs.r[0], 0x10);
     }
 
@@ -753,9 +883,10 @@ mod tests {
         // MOV r0, r1, ROR #0  ==  RRX
         let instr = (0xE << 28) | (DP_MOV << 21) | (0 << 12) | (SH_ROR << 5) | (0 << 7) | 1;
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 0b10;
         cpu.cpsr.flags = 1 << 29; // C = 1
-        cpu.step_arm(instr);
+        cpu.step_arm(&mut mem, instr);
         assert_eq!(cpu.regs.r[0], 0b1 | (1 << 31));
     }
 
@@ -764,7 +895,8 @@ mod tests {
         // MOV r0, #0xFF000000  (imm8 = 0xFF, rotate field = 4 → ROR by 8)
         let instr = (0xE << 28) | (DP_MOV << 21) | (1 << 25) | (4 << 8) | 0xFF;
         let mut cpu = Arm7tdmi::new();
-        cpu.step_arm(instr);
+        let mut mem = Memory::new();
+        cpu.step_arm(&mut mem, instr);
         assert_eq!(cpu.regs.r[0], 0xFF00_0000);
     }
 
@@ -772,9 +904,10 @@ mod tests {
     fn thumb_add_register() {
         // ADD r0, r1, r2  (00011 0 0 010 001 000)
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 5;
         cpu.regs.r[2] = 3;
-        cpu.step_thumb(0x1888);
+        cpu.step_thumb(&mut mem, 0x1888);
         assert_eq!(cpu.regs.r[0], 8);
     }
 
@@ -782,7 +915,8 @@ mod tests {
     fn thumb_mov_immediate() {
         // MOV r0, #42  (001 00 000 0010_1010)
         let mut cpu = Arm7tdmi::new();
-        cpu.step_thumb(0x202A);
+        let mut mem = Memory::new();
+        cpu.step_thumb(&mut mem, 0x202A);
         assert_eq!(cpu.regs.r[0], 42);
     }
 
@@ -790,8 +924,9 @@ mod tests {
     fn thumb_lsl_immediate() {
         // LSL r0, r1, #4  (000 00 00100 001 000)
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 1;
-        cpu.step_thumb(0x0108);
+        cpu.step_thumb(&mut mem, 0x0108);
         assert_eq!(cpu.regs.r[0], 0x10);
     }
 
@@ -799,9 +934,10 @@ mod tests {
     fn thumb_bx_switches_to_thumb_target() {
         // BX r1  (010001 11 0 0 001 000)
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 0x0800_0001; // bit0 = 1 → Thumb state
         cpu.cpsr.thumb = false;
-        cpu.step_thumb(0x4708);
+        cpu.step_thumb(&mut mem, 0x4708);
         assert_eq!(cpu.regs.pc(), 0x0800_0000);
         assert!(cpu.cpsr.thumb);
     }
@@ -810,9 +946,10 @@ mod tests {
     fn thumb_conditional_branch_taken_when_z() {
         // BEQ #4  (1101 0000 0000 0100)
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.set_pc(0x100);
         cpu.cpsr.flags = 1 << 30; // Z set
-        cpu.step_thumb(0xD004);
+        cpu.step_thumb(&mut mem, 0xD004);
         assert_eq!(cpu.regs.pc(), 0x108); // 0x100 + (4 << 1)
     }
 
@@ -820,8 +957,9 @@ mod tests {
     fn arm_bl_sets_lr_and_pc() {
         // BL +8  (cond AL, 101, L=1, offset24 = 2)
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.set_pc(0x100);
-        cpu.step_arm(0xEB00_0002);
+        cpu.step_arm(&mut mem, 0xEB00_0002);
         assert_eq!(cpu.regs.pc(), 0x108);
         assert_eq!(cpu.regs.r[14], 0xFC); // LR = pc - 4
     }
@@ -830,9 +968,10 @@ mod tests {
     fn arm_mul() {
         // MUL r0, r1, r2  (000000 0 0 0000 0000 0001 1001 0010)
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[1] = 6;
         cpu.regs.r[2] = 7;
-        cpu.step_arm(0xE000_0192);
+        cpu.step_arm(&mut mem, 0xE000_0192);
         assert_eq!(cpu.regs.r[0], 42);
     }
 
@@ -840,9 +979,10 @@ mod tests {
     fn arm_mrs_reads_cpsr() {
         // MRS r0, CPSR  (00010 0 00 1111 0000 0000 0000 0000)
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.cpsr.flags = 1 << 30; // Z
         cpu.cpsr.mode = 0x1F;     // System
-        cpu.step_arm(0xE10F_0000);
+        cpu.step_arm(&mut mem, 0xE10F_0000);
         assert_eq!(cpu.regs.r[0], (1 << 30) | 0x1F);
     }
 
@@ -850,10 +990,55 @@ mod tests {
     fn arm_msr_writes_cpsr() {
         // MSR CPSR, r0  (00010 0 10 1111 1111 0000 0000 0000)
         let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
         cpu.regs.r[0] = (3 << 30) | (1 << 7) | (1 << 6) | 0x13; // N+Z, IRQ+FIQ disable, SVC mode
-        cpu.step_arm(0xE12F_F000);
+        cpu.step_arm(&mut mem, 0xE12F_F000);
         assert!(cpu.cpsr.n() && cpu.cpsr.z());
         assert!(cpu.cpsr.irq_disable && cpu.cpsr.fiq_disable);
         assert_eq!(cpu.cpsr.mode, 0x13);
+    }
+
+    #[test]
+    fn arm_ldr_word() {
+        // LDR r0, [r1]  (0xE7910000)
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        mem.write32(0x0300_0000, 0xDEAD_BEEF);
+        cpu.regs.r[1] = 0x0300_0000;
+        cpu.step_arm(&mut mem, 0xE791_0000);
+        assert_eq!(cpu.regs.r[0], 0xDEAD_BEEF);
+    }
+
+    #[test]
+    fn arm_str_word() {
+        // STR r0, [r1]  (0xE7810000)
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        cpu.regs.r[0] = 0x1234_5678;
+        cpu.regs.r[1] = 0x0300_0000;
+        cpu.step_arm(&mut mem, 0xE781_0000);
+        assert_eq!(mem.read32(0x0300_0000), 0x1234_5678);
+    }
+
+    #[test]
+    fn arm_ldrb_byte() {
+        // LDRB r0, [r1]  (0xE7D10000)
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        mem.write8(0x0300_0000, 0xAB);
+        cpu.regs.r[1] = 0x0300_0000;
+        cpu.step_arm(&mut mem, 0xE7D1_0000);
+        assert_eq!(cpu.regs.r[0], 0xAB);
+    }
+
+    #[test]
+    fn thumb_ldr_word_imm() {
+        // LDR r0, [r1, #4]  (0x6848)
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        mem.write32(0x0300_0004, 0xCAFE);
+        cpu.regs.r[1] = 0x0300_0000;
+        cpu.step_thumb(&mut mem, 0x6848);
+        assert_eq!(cpu.regs.r[0], 0xCAFE);
     }
 }
