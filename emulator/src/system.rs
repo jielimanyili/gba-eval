@@ -75,4 +75,33 @@ mod tests {
         assert_eq!(sys.cpu.regs.r[0], 42);
         assert_eq!(sys.cpu.regs.pc(), 0x0800_000C); // advanced by 4
     }
+
+    #[test]
+    fn cpu_runs_program_and_ppu_renders() {
+        let mut sys = System::new();
+        // ARM program: set mode 3, write red to VRAM[0], loop forever.
+        let program: [u32; 7] = [
+            0xE3A0_0404, // MOV r0, #0x04000000
+            0xE3A0_1003, // MOV r1, #3
+            0xE1C0_10B0, // STRH r1, [r0]   (DISPCNT = mode 3)
+            0xE3A0_0406, // MOV r0, #0x06000000
+            0xE3A0_101F, // MOV r1, #0x1F   (red)
+            0xE1C0_10B0, // STRH r1, [r0]   (VRAM[0] = red)
+            0xEAFF_FFFE, // B .             (infinite loop)
+        ];
+        let mut rom = Vec::new();
+        for w in &program {
+            rom.extend_from_slice(&w.to_le_bytes());
+        }
+        sys.load_rom(&rom);
+        sys.cpu.regs.set_pc(0x0800_0008);
+
+        for _ in 0..6 {
+            sys.step();
+        }
+
+        let mut fb = vec![0u8; 240 * 160 * 3];
+        sys.render_frame(&mut fb);
+        assert_eq!(&fb[0..3], &[255, 0, 0]); // red at (0,0)
+    }
 }
