@@ -243,6 +243,12 @@ fn sub_with_borrow(a: u32, b: u32, borrow_in: u32) -> (u32, bool, bool) {
     (result, carry, overflow)
 }
 
+/// Sign-extend an N-bit field to a 32-bit signed value.
+fn sign_extend(value: u32, bits: u32) -> i32 {
+    let shift = 32 - bits;
+    ((value << shift) as i32) >> shift
+}
+
 /// The CPU core.
 #[derive(Default)]
 pub struct Arm7tdmi {
@@ -343,6 +349,207 @@ impl Arm7tdmi {
                 self.regs.r[rd] = result;
             }
         }
+    }
+
+    fn set_nzcv(&mut self, result: u32, carry: bool, overflow: bool) {
+        let mut flags = 0u32;
+        if result & (1 << 31) != 0 {
+            flags |= 1 << 31; // N
+        }
+        if result == 0 {
+            flags |= 1 << 30; // Z
+        }
+        if carry {
+            flags |= 1 << 29; // C
+        }
+        if overflow {
+            flags |= 1 << 28; // V
+        }
+        self.cpsr.flags = flags;
+    }
+
+    /// Execute a single Thumb (16-bit) instruction, returning the cycles consumed.
+    pub fn step_thumb(&mut self, instr: u16) -> u32 {
+        let instr = instr as u32;
+        match (instr >> 11) & 0x1F {
+            0x00..=0x02 => self.thumb_move_shifted(instr),
+            0x03 => self.thumb_add_sub(instr),
+            0x04..=0x07 => self.thumb_mov_cmp_add_sub_imm(instr),
+            0x08 => {
+                if (instr >> 10) & 1 == 0 {
+                    self.thumb_alu(instr);
+                } else {
+                    self.thumb_hi_reg(instr);
+                }
+            }
+            0x14..=0x15 => self.thumb_load_address(instr),
+            0x16 => {
+                if (instr >> 10) & 1 == 0 {
+                    self.thumb_add_sp(instr); // else PUSH/POP — Phase 2
+                }
+            }
+            0x1A..=0x1B => self.thumb_cond_branch(instr),
+            0x1C..=0x1D => self.thumb_branch(instr),
+            // 0x09 (PC load), 0x0A..0x0F (load/store), 0x10..0x13 (halfword),
+            // 0x18..0x19 (LDM/STM), 0x1E..0x1F (BL): deferred to Phase 2 (memory).
+            _ => {}
+        }
+        1
+    }
+
+    /// Format 1: move shifted register (`000 op imm5 Rs Rd`).
+    fn thumb_move_shifted(&mut self, instr: u32) {
+        let op = (instr >> 11) & 0x3; // 00 LSL, 01 LSR, 10 ASR
+        let imm5 = (instr >> 6) & 0x1F;
+        let rs = ((instr >> 3) & 0x7) as usize;
+        let rd = (instr & 0x7) as usize;
+        let (result, carry) = shift_amount(self.regs.r[rs], op, imm5, self.cpsr.c());
+        self.regs.r[rd] = result;
+        self.set_nzcv(result, carry, self.cpsr.v());
+    }
+
+    /// Format 2: add/subtract (`00011 I op Rn/offset3 Rs Rd`).
+    fn thumb_add_sub(&mut self, instr: u32) {
+        let i = (instr >> 10) & 1;
+        let op = (instr >> 9) & 1; // 0 ADD, 1 SUB
+        let rn = ((instr >> 3) & 0x7) as usize;
+        let rd = (instr & 0x7) as usize;
+        let operand = if i == 0 {
+            self.regs.r[((instr >> 6) & 0x7) as usize]
+        } else {
+            (instr >> 6) & 0x7
+        };
+        let (result, carry, overflow) = if op == 0 {
+            add_with_carry(self.regs.r[rn], operand, 0)
+        } else {
+            sub_with_borrow(self.regs.r[rn], operand, 0)
+        };
+        self.regs.r[rd] = result;
+        self.set_nzcv(result, carry, overflow);
+    }
+
+    /// Format 3: move/compare/add/subtract immediate (`001 op Rd offset8`).
+    fn thumb_mov_cmp_add_sub_imm(&mut self, instr: u32) {
+        let op = (instr >> 11) & 0x3; // 00 MOV, 01 CMP, 10 ADD, 11 SUB
+        let rd = ((instr >> 8) & 0x7) as usize;
+        let imm = instr & 0xFF;
+        match op {
+            0 => {
+                self.regs.r[rd] = imm;
+                self.set_nzcv(imm, self.cpsr.c(), self.cpsr.v());
+            }
+            1 => {
+                let (result, carry, overflow) = sub_with_borrow(self.regs.r[rd], imm, 0);
+                self.set_nzcv(result, carry, overflow);
+            }
+            2 => {
+                let (result, carry, overflow) = add_with_carry(self.regs.r[rd], imm, 0);
+                self.regs.r[rd] = result;
+                self.set_nzcv(result, carry, overflow);
+            }
+            3 => {
+                let (result, carry, overflow) = sub_with_borrow(self.regs.r[rd], imm, 0);
+                self.regs.r[rd] = result;
+                self.set_nzcv(result, carry, overflow);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Format 4: ALU operations (`010000 op Rs Rd`).
+    fn thumb_alu(&mut self, instr: u32) {
+        let op = (instr >> 6) & 0xF;
+        let rs = ((instr >> 3) & 0x7) as usize;
+        let rd = (instr & 0x7) as usize;
+        let a = self.regs.r[rd];
+        let b = self.regs.r[rs];
+        let c = self.cpsr.c();
+
+        match op {
+            0x0 => { let r = a & b; self.regs.r[rd] = r; self.set_nzcv(r, c, self.cpsr.v()); }
+            0x1 => { let r = a ^ b; self.regs.r[rd] = r; self.set_nzcv(r, c, self.cpsr.v()); }
+            0x2 => { let (r, cy) = shift_register(a, SH_LSL, b, c); self.regs.r[rd] = r; self.set_nzcv(r, cy, self.cpsr.v()); }
+            0x3 => { let (r, cy) = shift_register(a, SH_LSR, b, c); self.regs.r[rd] = r; self.set_nzcv(r, cy, self.cpsr.v()); }
+            0x4 => { let (r, cy) = shift_register(a, SH_ASR, b, c); self.regs.r[rd] = r; self.set_nzcv(r, cy, self.cpsr.v()); }
+            0x5 => { let (r, cy, ov) = add_with_carry(a, b, c as u32); self.regs.r[rd] = r; self.set_nzcv(r, cy, ov); }
+            0x6 => { let (r, cy, ov) = sub_with_borrow(a, b, (!c) as u32); self.regs.r[rd] = r; self.set_nzcv(r, cy, ov); }
+            0x7 => { let (r, cy) = shift_register(a, SH_ROR, b, c); self.regs.r[rd] = r; self.set_nzcv(r, cy, self.cpsr.v()); }
+            0x8 => { let r = a & b; self.set_nzcv(r, c, self.cpsr.v()); } // TST
+            0x9 => { let (r, cy, ov) = sub_with_borrow(0, b, 0); self.regs.r[rd] = r; self.set_nzcv(r, cy, ov); } // NEG
+            0xA => { let (r, cy, ov) = sub_with_borrow(a, b, 0); self.set_nzcv(r, cy, ov); } // CMP
+            0xB => { let (r, cy, ov) = add_with_carry(a, b, 0); self.set_nzcv(r, cy, ov); } // CMN
+            0xC => { let r = a | b; self.regs.r[rd] = r; self.set_nzcv(r, c, self.cpsr.v()); }
+            0xD => { let r = a.wrapping_mul(b); self.regs.r[rd] = r; self.set_nzcv(r, c, self.cpsr.v()); } // MUL
+            0xE => { let r = a & !b; self.regs.r[rd] = r; self.set_nzcv(r, c, self.cpsr.v()); }
+            0xF => { let r = !b; self.regs.r[rd] = r; self.set_nzcv(r, c, self.cpsr.v()); } // MVN
+            _ => unreachable!(),
+        }
+    }
+
+    /// Format 5: hi-register operations / branch exchange (`010001 op H1 H2 Rs Rd`).
+    fn thumb_hi_reg(&mut self, instr: u32) {
+        let op = (instr >> 8) & 0x3; // 00 ADD, 01 CMP, 10 MOV, 11 BX
+        let rs = ((((instr >> 6) & 1) << 3) | ((instr >> 3) & 0x7)) as usize;
+        let rd = ((((instr >> 7) & 1) << 3) | (instr & 0x7)) as usize;
+        match op {
+            0 => self.regs.r[rd] = self.regs.r[rd].wrapping_add(self.regs.r[rs]), // flags unchanged
+            1 => {
+                let (r, cy, ov) = sub_with_borrow(self.regs.r[rd], self.regs.r[rs], 0);
+                self.set_nzcv(r, cy, ov);
+            }
+            2 => self.regs.r[rd] = self.regs.r[rs], // flags unchanged
+            3 => {
+                let target = self.regs.r[rs];
+                self.cpsr.thumb = target & 1 != 0;
+                self.regs.set_pc(target & 0xFFFF_FFFE);
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Format 12: load address (`1010 SP Rd word8`) — Rd = (PC|SP) + (word8 << 2).
+    fn thumb_load_address(&mut self, instr: u32) {
+        let sp = (instr >> 11) & 1;
+        let rd = ((instr >> 8) & 0x7) as usize;
+        let word8 = instr & 0xFF;
+        let base = if sp == 1 {
+            self.regs.r[13]
+        } else {
+            self.regs.pc() & 0xFFFF_FFFC
+        };
+        self.regs.r[rd] = base.wrapping_add(word8 << 2);
+    }
+
+    /// Format 13: add/subtract to stack pointer (`1011 0000 S word7`).
+    fn thumb_add_sp(&mut self, instr: u32) {
+        let s = (instr >> 7) & 1;
+        let delta = (instr & 0x7F) << 2;
+        self.regs.r[13] = if s == 1 {
+            self.regs.r[13].wrapping_sub(delta)
+        } else {
+            self.regs.r[13].wrapping_add(delta)
+        };
+    }
+
+    /// Format 16: conditional branch (`1101 cond soffset8`).
+    fn thumb_cond_branch(&mut self, instr: u32) {
+        let cond_bits = (instr >> 8) & 0xF;
+        if cond_bits == 0xF {
+            return; // SWI — deferred (Phase 2+).
+        }
+        let cond = Cond::from_bits(cond_bits);
+        if condition_passes(cond, self.cpsr.flags) {
+            let offset = sign_extend(instr & 0xFF, 8);
+            let target = (self.regs.pc() as i32).wrapping_add(offset << 1) as u32;
+            self.regs.set_pc(target);
+        }
+    }
+
+    /// Format 18: unconditional branch (`11100 offset11`).
+    fn thumb_branch(&mut self, instr: u32) {
+        let offset = sign_extend(instr & 0x7FF, 11);
+        let target = (self.regs.pc() as i32).wrapping_add(offset << 1) as u32;
+        self.regs.set_pc(target);
     }
 }
 
@@ -450,5 +657,53 @@ mod tests {
         let mut cpu = Arm7tdmi::new();
         cpu.step_arm(instr);
         assert_eq!(cpu.regs.r[0], 0xFF00_0000);
+    }
+
+    #[test]
+    fn thumb_add_register() {
+        // ADD r0, r1, r2  (00011 0 0 010 001 000)
+        let mut cpu = Arm7tdmi::new();
+        cpu.regs.r[1] = 5;
+        cpu.regs.r[2] = 3;
+        cpu.step_thumb(0x1888);
+        assert_eq!(cpu.regs.r[0], 8);
+    }
+
+    #[test]
+    fn thumb_mov_immediate() {
+        // MOV r0, #42  (001 00 000 0010_1010)
+        let mut cpu = Arm7tdmi::new();
+        cpu.step_thumb(0x202A);
+        assert_eq!(cpu.regs.r[0], 42);
+    }
+
+    #[test]
+    fn thumb_lsl_immediate() {
+        // LSL r0, r1, #4  (000 00 00100 001 000)
+        let mut cpu = Arm7tdmi::new();
+        cpu.regs.r[1] = 1;
+        cpu.step_thumb(0x0108);
+        assert_eq!(cpu.regs.r[0], 0x10);
+    }
+
+    #[test]
+    fn thumb_bx_switches_to_thumb_target() {
+        // BX r1  (010001 11 0 0 001 000)
+        let mut cpu = Arm7tdmi::new();
+        cpu.regs.r[1] = 0x0800_0001; // bit0 = 1 → Thumb state
+        cpu.cpsr.thumb = false;
+        cpu.step_thumb(0x4708);
+        assert_eq!(cpu.regs.pc(), 0x0800_0000);
+        assert!(cpu.cpsr.thumb);
+    }
+
+    #[test]
+    fn thumb_conditional_branch_taken_when_z() {
+        // BEQ #4  (1101 0000 0000 0100)
+        let mut cpu = Arm7tdmi::new();
+        cpu.regs.set_pc(0x100);
+        cpu.cpsr.flags = 1 << 30; // Z set
+        cpu.step_thumb(0xD004);
+        assert_eq!(cpu.regs.pc(), 0x108); // 0x100 + (4 << 1)
     }
 }
