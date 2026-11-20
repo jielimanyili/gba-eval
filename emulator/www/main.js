@@ -111,20 +111,77 @@ const PROGRAM = [
 
 const REG_NAMES = ['r0','r1','r2','r3','r4','r5','r6','r7','r8','r9','r10','r11','r12','sp','lr','pc'];
 
+// --- Grading (SSIM replay, ADR-003) -------------------------------------
+
+// Global SSIM between two equal-length byte arrays (port of grader/replay.py).
+function ssim(a, b) {
+  const n = a.length;
+  if (n === 0 || n !== b.length) throw new Error('length mismatch');
+  const C1 = (0.01 * 255) ** 2;
+  const C2 = (0.03 * 255) ** 2;
+  let muA = 0, muB = 0;
+  for (let i = 0; i < n; i++) { muA += a[i]; muB += b[i]; }
+  muA /= n; muB /= n;
+  let va = 0, vb = 0, cov = 0;
+  for (let i = 0; i < n; i++) {
+    const da = a[i] - muA, db = b[i] - muB;
+    va += da * da; vb += db * db; cov += da * db;
+  }
+  va /= (n - 1); vb /= (n - 1); cov /= (n - 1);
+  return (2 * muA * muB + C1) * (2 * cov + C2) /
+         ((muA * muA + muB * muB + C1) * (va + vb + C2));
+}
+
+// Known-correct first frame: black, with a red 24×24 square at (102, 71) —
+// the bounce ROM's state after setup (12 instructions) + one frame.
+function bounceReferenceFrame() {
+  const ref = new Uint8Array(FB_SIZE);
+  const X = 102, Y = 71, S = 24;
+  for (let y = Y; y < Y + S; y++) {
+    for (let x = X; x < X + S; x++) {
+      ref[(y * WIDTH + x) * 3] = 255;
+    }
+  }
+  return ref;
+}
+
+// Run a fresh emulator instance to the deterministic checkpoint and SSIM its
+// frame against the golden reference — the in-browser replay grader.
+function gradeBounceDemo(w) {
+  const emu = w.emu_create();
+  const romPtr = w.emu_alloc(DEMO_ROM.length);
+  new Uint8Array(w.memory.buffer, romPtr, DEMO_ROM.length).set(DEMO_ROM);
+  w.emu_load_rom(emu, romPtr, DEMO_ROM.length);
+  w.emu_set_pc(emu, 0x08000008);
+  w.emu_step(emu, 12 + PER_FRAME); // setup + one frame
+
+  const fbPtr = w.emu_alloc(FB_SIZE);
+  w.emu_render(emu, fbPtr);
+  const candidate = new Uint8Array(w.memory.buffer, fbPtr, FB_SIZE);
+  const score = ssim(candidate, bounceReferenceFrame());
+  w.emu_destroy(emu);
+  return score;
+}
+
 async function main() {
   const { instance } = await WebAssembly.instantiateStreaming(fetch('gba_emulator.wasm'), {});
   const w = instance.exports;
 
   const emu = w.emu_create();
 
-  // Load ROM, reset PC (r15 = address + 8), run the 4 setup instructions.
+  // Load ROM, reset PC (r15 = address + 8), run the 12 setup instructions.
   const romPtr = w.emu_alloc(DEMO_ROM.length);
   new Uint8Array(w.memory.buffer, romPtr, DEMO_ROM.length).set(DEMO_ROM);
   w.emu_load_rom(emu, romPtr, DEMO_ROM.length);
   w.emu_set_pc(emu, 0x08000008);
-  w.emu_step(emu, 4);
+  w.emu_step(emu, 12);
 
-  // Framebuffer (allocated once; wasm memory won't grow after this point).
+  // Grade the candidate against the known-correct first frame (SSIM replay).
+  // Do this before allocating the main framebuffer view: emu_alloc may grow
+  // wasm memory, which detaches existing Uint8Array views of it.
+  const ssimScore = gradeBounceDemo(w);
+
+  // Framebuffer (allocated after all emu_alloc growth, so this view is stable).
   const fbPtr = w.emu_alloc(FB_SIZE);
   const fb = new Uint8Array(w.memory.buffer, fbPtr, FB_SIZE);
 
@@ -138,6 +195,14 @@ async function main() {
   const instrEl = document.getElementById('instr');
   const pcEl = document.getElementById('pc');
   const regsEl = document.getElementById('regs');
+
+  // Show the grading report.
+  const ssimEl = document.getElementById('ssim');
+  const verdictEl = document.getElementById('verdict');
+  ssimEl.textContent = ssimScore.toFixed(6);
+  const pass = ssimScore >= 0.99;
+  verdictEl.textContent = pass ? 'PASS ✓' : 'FAIL ✗';
+  verdictEl.className = pass ? 'pass' : 'fail';
 
   // Build the disassembly listing as highlightable rows.
   const programEl = document.getElementById('program');
