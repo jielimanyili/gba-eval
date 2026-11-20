@@ -20,7 +20,7 @@ fn main() {
     if args.len() < 4 {
         eprintln!("usage: gba-run <rom> <steps> <out.ppm> [--pc ADDR]");
         eprintln!("  runs the ROM for <steps> instructions and writes a PPM framebuffer.");
-        eprintln!("  defaults to --pc 0x08000008 (program at 0x08000000, r15 = addr + 8).");
+        eprintln!("  defaults to --pc 0x080000C8 (program at 0x080000C0 after the header).");
         std::process::exit(2);
     }
 
@@ -28,7 +28,10 @@ fn main() {
     let steps: u32 = args[2].parse().expect("steps must be an integer");
     let out = &args[3];
 
-    let mut pc = 0x0800_0008u32;
+    // Dev ROMs ship a 192-byte GBA header; the program lives at 0x080000C0.
+    // r15 = addr + 8, so the default start is 0x080000C8. Raw (headerless)
+    // ROMs can override with --pc 0x08000008.
+    let mut pc = 0x0800_00C8u32;
     let mut i = 4;
     while i < args.len() {
         if args[i] == "--pc" {

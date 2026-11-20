@@ -6,18 +6,20 @@
 
 FROM rust:1-bookworm
 
-# --- Runtime deps for the oracle CLI (Python) + Mesen2 download (unzip/curl).
+# --- Runtime deps for the oracle CLI (Python) + Mesen download (unzip/curl) +
+# --- SDL2 (required by Mesen/MesenCE's native Linux build).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 curl unzip \
+        python3 curl unzip libsdl2-2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
-# --- Mesen2 oracle (black-box binary, GPL — invoked, never vendored/modified).
-# Pin a release; adjust the asset name to the exact Mesen2 release if needed.
-ARG MESEN2_VERSION=2.0.0.1
-ARG MESEN2_URL=https://github.com/SourMesen/Mesen2/releases/download/${MESEN2_VERSION}/Mesen2.${MESEN2_VERSION}-linux-x64.zip
-RUN curl -fsSL -o /tmp/mesen2.zip "$MESEN2_URL" \
-    && unzip -q /tmp/mesen2.zip -d /opt/mesen2 \
-    && rm /tmp/mesen2.zip
+# --- MesenCE oracle (black-box binary, GPL — invoked, never vendored/modified).
+# MesenCE is the maintained successor to the archived Mesen2. The release asset
+# name/URL must be verified against the pinned release before building.
+ARG MESENCE_VERSION=2.2.0
+ARG MESENCE_URL=https://github.com/nesdev-org/MesenCE/releases/download/${MESENCE_VERSION}/Mesen.${MESENCE_VERSION}-linux-x64.zip
+RUN curl -fsSL -o /tmp/mesen.zip "$MESENCE_URL" \
+    && unzip -q /tmp/mesen.zip -d /opt/mesen \
+    && rm /tmp/mesen.zip
 
 # --- Toolchain: Rust + wasm32 (the candidate compiles to WebAssembly).
 RUN rustup target add wasm32-unknown-unknown
@@ -30,7 +32,7 @@ COPY grader/roms/ /work/roms/
 COPY environment/oracle /usr/local/bin/oracle
 RUN chmod +x /usr/local/bin/oracle
 
-ENV MESEN2=/opt/mesen2/Mesen2
-ENV PATH="/opt/mesen2:${PATH}"
+ENV MESEN=/opt/mesen/Mesen
+ENV PATH="/opt/mesen:${PATH}"
 
 CMD ["/bin/bash"]

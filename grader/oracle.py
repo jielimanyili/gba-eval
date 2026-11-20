@@ -53,13 +53,19 @@ def golden_run(rom: str, out: str, steps: int) -> None:
 
 
 def mesen2_run(rom: str, out: str, steps: int) -> None:
-    mesen2 = os.environ.get("MESEN2", "Mesen2")
+    mesen = os.environ.get("MESEN", "Mesen")
     lua = os.path.join(HERE, "mesen2_capture.lua")
-    raw = out + ".raw"  # Mesen2 writes raw RGB; converted to PPM below.
-    # Mesen2 runs the Lua script headlessly and captures the framebuffer.
+    raw = out + ".raw"  # Mesen writes raw RGB; converted to PPM below.
+    env = dict(os.environ)
+    env["MESEN_CAPTURE_OUT"] = raw
+    # Static dev ROMs: capture a few frames past BIOS boot + fill.
+    env["MESEN_CAPTURE_FRAMES"] = os.environ.get("MESEN_CAPTURE_FRAMES", "5")
+    # Headless test-runner mode: Mesen loads the ROM and runs the Lua script at
+    # max speed; the script captures the framebuffer and calls emu.stop().
     # (GPL binary, invoked as a subprocess only — never vendored or modified.)
     subprocess.run(
-        [mesen2, "--runscript", lua, rom, raw, str(steps)],
+        [mesen, "--testrunner", rom, lua],
+        env=env,
         check=True,
     )
     with open(raw, "rb") as f:
