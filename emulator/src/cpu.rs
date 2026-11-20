@@ -249,11 +249,45 @@ fn sign_extend(value: u32, bits: u32) -> i32 {
     ((value << shift) as i32) >> shift
 }
 
+impl Psr {
+    /// Pack into a full 32-bit CPSR/SPSR value.
+    pub fn pack(&self) -> u32 {
+        let mut v = self.flags & 0xF000_0000;
+        if self.thumb {
+            v |= 1 << 5;
+        }
+        if self.fiq_disable {
+            v |= 1 << 6;
+        }
+        if self.irq_disable {
+            v |= 1 << 7;
+        }
+        v | (self.mode & 0x1F)
+    }
+}
+
+/// Write an MSR operand into a PSR, honoring the field mask (bits 3..0 = f/s/x/c).
+fn apply_field_mask(psr: &mut Psr, field_mask: u32, operand: u32) {
+    if field_mask & 0x8 != 0 {
+        psr.flags = operand & 0xF000_0000;
+    }
+    // field_mask & 0x4 (bits 23..16) and & 0x2 (bits 15..8) are not modeled.
+    if field_mask & 0x1 != 0 {
+        psr.thumb = operand & (1 << 5) != 0;
+        psr.fiq_disable = operand & (1 << 6) != 0;
+        psr.irq_disable = operand & (1 << 7) != 0;
+        psr.mode = operand & 0x1F;
+    }
+}
+
 /// The CPU core.
 #[derive(Default)]
 pub struct Arm7tdmi {
     pub regs: RegisterFile,
     pub cpsr: Psr,
+    /// Banked SPSR (single bank for now; proper per-mode banking comes with
+    /// exception handling in Phase 2+).
+    pub spsr: Psr,
 }
 
 impl Arm7tdmi {
@@ -268,12 +302,87 @@ impl Arm7tdmi {
             // Predicated false — ARM still consumes one S-cycle.
             return 1;
         }
-        // Data-processing class (bits 27..26 == 00) is implemented in Phase 1;
-        // all other classes land in later phases.
-        if (instr & 0x0C00_0000) == 0 {
-            self.exec_data_processing(instr);
+        match (instr >> 25) & 0x7 {
+            0b000 | 0b001 => self.exec_data_processing_class(instr),
+            0b101 => self.exec_branch(instr),
+            // 0b010/0b011 (load/store), 0b100 (LDM/STM), 0b110/0b111 (SWI/coprocessor):
+            // Phase 2+ (memory).
+            _ => {}
         }
         1
+    }
+
+    fn exec_data_processing_class(&mut self, instr: u32) {
+        if (instr & 0x0FC0_00F0) == 0x0000_0090 {
+            self.exec_multiply(instr);
+        } else if (instr & 0x0FBF_0FFF) == 0x010F_0000 {
+            self.exec_mrs(instr);
+        } else if (instr & 0x0FBF_0FF0) == 0x012F_0000 || (instr & 0x0FBF_0000) == 0x032F_0000 {
+            self.exec_msr(instr);
+        } else {
+            self.exec_data_processing(instr);
+        }
+    }
+
+    fn exec_branch(&mut self, instr: u32) {
+        let link = (instr >> 24) & 1 == 1;
+        let offset = sign_extend(instr & 0xFF_FFFF, 24) << 2;
+        let pc = self.regs.pc();
+        if link {
+            self.regs.r[14] = pc - 4; // LR = next instruction
+        }
+        self.regs.set_pc((pc as i32).wrapping_add(offset) as u32);
+    }
+
+    fn exec_multiply(&mut self, instr: u32) {
+        let accumulate = (instr >> 21) & 1 == 1;
+        let s = (instr >> 20) & 1 == 1;
+        let rd = ((instr >> 16) & 0xF) as usize;
+        let rn = ((instr >> 12) & 0xF) as usize;
+        let rs = ((instr >> 8) & 0xF) as usize;
+        let rm = (instr & 0xF) as usize;
+        let mut result = self.regs.r[rm].wrapping_mul(self.regs.r[rs]);
+        if accumulate {
+            result = result.wrapping_add(self.regs.r[rn]);
+        }
+        self.regs.r[rd] = result;
+        if s {
+            let mut flags = self.cpsr.flags & ((1 << 29) | (1 << 28)); // keep C/V
+            if result & (1 << 31) != 0 {
+                flags |= 1 << 31;
+            }
+            if result == 0 {
+                flags |= 1 << 30;
+            }
+            self.cpsr.flags = flags;
+        }
+    }
+
+    fn exec_mrs(&mut self, instr: u32) {
+        let r = (instr >> 22) & 1;
+        let rd = ((instr >> 12) & 0xF) as usize;
+        if rd == 15 {
+            return; // Unpredictable.
+        }
+        let value = if r == 1 { self.spsr.pack() } else { self.cpsr.pack() };
+        self.regs.r[rd] = value;
+    }
+
+    fn exec_msr(&mut self, instr: u32) {
+        let r = (instr >> 22) & 1;
+        let field_mask = (instr >> 12) & 0xF;
+        let operand = if (instr >> 25) & 1 == 1 {
+            let rotate = ((instr >> 8) & 0xF) * 2;
+            let (value, _) = shift_register(instr & 0xFF, SH_ROR, rotate, false);
+            value
+        } else {
+            self.regs.r[(instr & 0xF) as usize]
+        };
+        if r == 1 {
+            apply_field_mask(&mut self.spsr, field_mask, operand);
+        } else {
+            apply_field_mask(&mut self.cpsr, field_mask, operand);
+        }
     }
 
     fn exec_data_processing(&mut self, instr: u32) {
@@ -705,5 +814,46 @@ mod tests {
         cpu.cpsr.flags = 1 << 30; // Z set
         cpu.step_thumb(0xD004);
         assert_eq!(cpu.regs.pc(), 0x108); // 0x100 + (4 << 1)
+    }
+
+    #[test]
+    fn arm_bl_sets_lr_and_pc() {
+        // BL +8  (cond AL, 101, L=1, offset24 = 2)
+        let mut cpu = Arm7tdmi::new();
+        cpu.regs.set_pc(0x100);
+        cpu.step_arm(0xEB00_0002);
+        assert_eq!(cpu.regs.pc(), 0x108);
+        assert_eq!(cpu.regs.r[14], 0xFC); // LR = pc - 4
+    }
+
+    #[test]
+    fn arm_mul() {
+        // MUL r0, r1, r2  (000000 0 0 0000 0000 0001 1001 0010)
+        let mut cpu = Arm7tdmi::new();
+        cpu.regs.r[1] = 6;
+        cpu.regs.r[2] = 7;
+        cpu.step_arm(0xE000_0192);
+        assert_eq!(cpu.regs.r[0], 42);
+    }
+
+    #[test]
+    fn arm_mrs_reads_cpsr() {
+        // MRS r0, CPSR  (00010 0 00 1111 0000 0000 0000 0000)
+        let mut cpu = Arm7tdmi::new();
+        cpu.cpsr.flags = 1 << 30; // Z
+        cpu.cpsr.mode = 0x1F;     // System
+        cpu.step_arm(0xE10F_0000);
+        assert_eq!(cpu.regs.r[0], (1 << 30) | 0x1F);
+    }
+
+    #[test]
+    fn arm_msr_writes_cpsr() {
+        // MSR CPSR, r0  (00010 0 10 1111 1111 0000 0000 0000)
+        let mut cpu = Arm7tdmi::new();
+        cpu.regs.r[0] = (3 << 30) | (1 << 7) | (1 << 6) | 0x13; // N+Z, IRQ+FIQ disable, SVC mode
+        cpu.step_arm(0xE12F_F000);
+        assert!(cpu.cpsr.n() && cpu.cpsr.z());
+        assert!(cpu.cpsr.irq_disable && cpu.cpsr.fiq_disable);
+        assert_eq!(cpu.cpsr.mode, 0x13);
     }
 }
