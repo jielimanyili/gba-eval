@@ -104,4 +104,38 @@ mod tests {
         sys.render_frame(&mut fb);
         assert_eq!(&fb[0..3], &[255, 0, 0]); // red at (0,0)
     }
+
+    #[test]
+    fn fill_screen_demo_renders_red() {
+        let mut sys = System::new();
+        // Demo program: set mode 3, fill the 240x160 framebuffer red.
+        let program: [u32; 10] = [
+            0xE3A0_3404, // MOV r3, #0x04000000
+            0xE3A0_4003, // MOV r4, #3
+            0xE1C3_40B0, // STRH r4, [r3]   (mode 3)
+            0xE3A0_0406, // MOV r0, #0x06000000
+            0xE3A0_1C96, // MOV r1, #0x9600 (38400 px)
+            0xE3A0_201F, // MOV r2, #0x1F   (red)
+            0xE0C0_20B2, // loop: STRH r2, [r0], #2
+            0xE251_1001, // SUBS r1, r1, #1
+            0x1AFF_FFFC, // BNE loop
+            0xEAFF_FFFE, // B .
+        ];
+        let mut rom = Vec::new();
+        for w in &program {
+            rom.extend_from_slice(&w.to_le_bytes());
+        }
+        sys.load_rom(&rom);
+        sys.cpu.regs.set_pc(0x0800_0008);
+
+        for _ in 0..200_000 {
+            sys.step();
+        }
+
+        let mut fb = vec![0u8; 240 * 160 * 3];
+        sys.render_frame(&mut fb);
+        assert_eq!(&fb[0..3], &[255, 0, 0]); // first pixel
+        let last = (159 * 240 + 239) * 3;
+        assert_eq!(&fb[last..last + 3], &[255, 0, 0]); // last pixel
+    }
 }

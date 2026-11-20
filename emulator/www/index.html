@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>GBA Emulator — demo</title>
+  <style>
+    body { background: #111; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 2rem; }
+    canvas { image-rendering: pixelated; border: 1px solid #333; }
+    code { background: #222; padding: 0.2rem 0.5rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <h1>GBA Emulator</h1>
+  <p>An ARM7TDMI emulator running a tiny ROM that sets <code>mode 3</code> and fills the framebuffer red — rendered in WebAssembly.</p>
+  <canvas id="screen"></canvas>
+  <script src="main.js"></script>
+</body>
+</html>
