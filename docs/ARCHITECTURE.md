@@ -31,8 +31,8 @@ flowchart LR
 ## 4. Components
 
 - **emulator/** — Rust GBA core: ARM7TDMI (ARM + Thumb), memory map + I/O registers, PPU (modes 0–5, backgrounds, sprites), APU (4 PSG channels + 2 FIFO), timers, DMA, interrupt controller. Emits frames (RGBA) + audio (PCM).
-- **grader/** — Python: `replay.py` (per-frame SSIM), `audio.py` (log-mel spectrogram distance), `procedural.py` (test-ROM pass/fail), `score.py` (weighted aggregate).
-- **environment/** — `Dockerfile`, `TASK.md` (the task statement / ABI spec), `oracle.py` (black-box Mesen2 wrapper: run ROM + input sequence → reference frames/audio).
+- **grader/** — Python: `replay.py` (per-frame SSIM), `oracle.py` (reference backends — `golden` for known-correct dev-ROM frames, `mesen2` for the real black-box reference), `score.py` (end-to-end), `roms/` (hand-encoded dev ROMs). `audio.py` (log-mel spectrogram) and `procedural.py` (test-ROM pass/fail) are planned.
+- **environment/** — `Dockerfile`, `TASK.md` (the task statement / ABI spec), and an `oracle` wrapper exposing the black-box Mesen2 reference.
 - **docs/** — architecture, ADRs, phases, roadmap.
 
 ## 5. Data model

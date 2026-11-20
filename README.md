@@ -8,14 +8,28 @@ GBA Eval makes "environments" and "grading" concrete: a sandboxed environment, a
 
 ## Structure
 
-- `emulator/` — Rust GBA emulator (ARM7TDMI CPU, PPU, APU, timers, DMA, interrupts), target `wasm32-unknown-unknown`.
-- `grader/` — Python grading harness: `replay.py` (SSIM), `audio.py` (log-mel spectrogram), `procedural.py` (test ROMs), `score.py` (weighted aggregate).
-- `environment/` — Docker sandbox, task statement (`TASK.md`), and the Mesen2 oracle CLI (`oracle.py`).
+- `emulator/` — Rust GBA emulator (ARM7TDMI CPU, memory map, PPU bitmap modes 3/4): a `wasm32` library + browser runner, plus a native `gba-run` CLI that dumps a framebuffer as PPM for the grader.
+- `grader/` — Python grading harness: `replay.py` (SSIM), `oracle.py` (golden + Mesen2 reference backends), `score.py` (end-to-end), `roms/` (hand-encoded dev ROMs). Audio + procedural signals are planned.
+- `environment/` — Docker sandbox (`Dockerfile`), task statement (`TASK.md`), and the Mesen2 oracle wrapper.
 - `docs/` — architecture, ADRs, roadmap, phases.
 
 ## Status
 
-Planning (Phase 0). See `docs/PHASES.md` and `docs/ROADMAP.md`.
+Working end-to-end on the golden path: CPU → PPU → frames → SSIM grading against a known-correct reference. The Mesen2 oracle backend is written but unverified (no Mesen2 binary in CI). See `docs/PHASES.md`.
+
+## Try it
+
+    # 1. build the candidate frame-dump CLI
+    (cd emulator && cargo build --release --bin gba-run)
+
+    # 2. grade a dev ROM (candidate vs golden reference, SSIM)
+    python3 grader/score.py grader/roms/fill_red.gba --oracle-backend golden
+
+    # 3. run the harness tests
+    python3 grader/test_grader.py
+
+    # 4. browser demo (live emulator + interactive debugger)
+    open https://gba-eval.vercel.app
 
 ## Docs
 

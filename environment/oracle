@@ -1,0 +1,5 @@
+#!/bin/sh
+# Oracle CLI wrapper (ADR-002/004): the candidate's only allowed interaction
+# with the reference. Delegates to the Python oracle, which wraps Mesen2 as a
+# black-box binary (GPL — invoked as an external process, never vendored).
+exec python3 /work/grader/oracle.py "$@"
