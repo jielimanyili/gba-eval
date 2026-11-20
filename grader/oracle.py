@@ -60,11 +60,12 @@ def mesen2_run(rom: str, out: str, steps: int) -> None:
     env["MESEN_CAPTURE_OUT"] = raw
     # Static dev ROMs: capture a few frames past BIOS boot + fill.
     env["MESEN_CAPTURE_FRAMES"] = os.environ.get("MESEN_CAPTURE_FRAMES", "5")
-    # Headless test-runner mode: Mesen loads the ROM and runs the Lua script at
-    # max speed; the script captures the framebuffer and calls emu.stop().
+    # Headless test-runner mode (NOTE: the flag is --testRunner, capital R):
+    # Mesen loads the ROM and runs the Lua script at max speed; the script
+    # captures the framebuffer and calls emu.stop().
     # (GPL binary, invoked as a subprocess only — never vendored or modified.)
     subprocess.run(
-        [mesen, "--testrunner", rom, lua],
+        [mesen, "--testRunner", rom, lua],
         env=env,
         check=True,
     )

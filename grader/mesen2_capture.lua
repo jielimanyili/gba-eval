@@ -1,7 +1,7 @@
 -- Capture a deterministic frame to a raw RGB file.
 --
 -- Mesen/MesenCE headless "test runner" mode (ADR-002):
---   Mesen --testrunner <rom> this_script.lua
+--   Mesen --testRunner <rom> this_script.lua
 -- Mesen loads the ROM; this script counts frames, captures the framebuffer at
 -- the target frame, writes RGB bytes, and calls emu.stop().
 --

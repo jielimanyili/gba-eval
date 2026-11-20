@@ -1,0 +1,8 @@
+# Rust / build artifacts (the candidate is built inside the container)
+**/target/
+.git/
+.gitignore
+.vercel/
+node_modules/
+dist/
+.DS_Store
