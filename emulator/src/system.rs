@@ -29,11 +29,17 @@ impl System {
     pub fn step(&mut self) {
         if self.cpu.cpsr.thumb {
             let addr = self.cpu.regs.pc() - 4;
-            let instr = self.mem.read16(addr);
-            let old = self.cpu.regs.pc();
-            self.cpu.step_thumb(&mut self.mem, instr);
-            if self.cpu.regs.pc() == old {
-                self.cpu.regs.set_pc(old + 2);
+            let first = self.mem.read16(addr);
+            if (first & 0xF800) == 0xF000 {
+                // BL — 32-bit Thumb instruction.
+                let second = self.mem.read16(addr + 2);
+                self.cpu.thumb_bl(first, second);
+            } else {
+                let old = self.cpu.regs.pc();
+                self.cpu.step_thumb(&mut self.mem, first);
+                if self.cpu.regs.pc() == old {
+                    self.cpu.regs.set_pc(old + 2);
+                }
             }
         } else {
             let addr = self.cpu.regs.pc() - 8;

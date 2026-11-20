@@ -251,6 +251,16 @@ fn sign_extend(value: u32, bits: u32) -> i32 {
     ((value << shift) as i32) >> shift
 }
 
+/// Sign-extend an 8-bit byte to a 32-bit value.
+fn sign_extend_byte(value: u8) -> u32 {
+    (value as i8) as i32 as u32
+}
+
+/// Sign-extend a 16-bit halfword to a 32-bit value.
+fn sign_extend_half(value: u16) -> u32 {
+    (value as i16) as i32 as u32
+}
+
 impl Psr {
     /// Pack into a full 32-bit CPSR/SPSR value.
     pub fn pack(&self) -> u32 {
@@ -305,10 +315,11 @@ impl Arm7tdmi {
             return 1;
         }
         match (instr >> 25) & 0x7 {
-            0b000 | 0b001 => self.exec_data_processing_class(instr),
+            0b000 | 0b001 => self.exec_data_processing_class(mem, instr),
             0b010 | 0b011 => self.exec_single_data_transfer(mem, instr), // LDR/STR/LDRB/STRB
+            0b100 => self.exec_block_transfer(mem, instr),               // LDM/STM
             0b101 => self.exec_branch(instr),
-            // 0b100 (LDM/STM), 0b110/0b111 (SWI/coprocessor): later phases.
+            // 0b110/0b111 (SWI/coprocessor): later phases.
             _ => {}
         }
         1
@@ -372,13 +383,89 @@ impl Arm7tdmi {
         }
     }
 
-    fn exec_data_processing_class(&mut self, instr: u32) {
+    /// Halfword/signed data transfer: LDRH/STRH/LDRSB/LDRSH.
+    fn exec_halfword_transfer(&mut self, mem: &mut Memory, instr: u32) {
+        let p = (instr >> 24) & 1;
+        let u = (instr >> 23) & 1;
+        let i = (instr >> 22) & 1;
+        let w = (instr >> 21) & 1;
+        let l = (instr >> 20) & 1;
+        let rn = ((instr >> 16) & 0xF) as usize;
+        let rd = ((instr >> 12) & 0xF) as usize;
+        let s = (instr >> 6) & 1; // signed
+        let h = (instr >> 5) & 1; // halfword
+
+        let base = self.regs.r[rn];
+        let offset = if i == 1 {
+            (((instr >> 8) & 0xF) << 4) | (instr & 0xF)
+        } else {
+            self.regs.r[(instr & 0xF) as usize]
+        };
+        let writeback_addr = if u == 1 {
+            base.wrapping_add(offset)
+        } else {
+            base.wrapping_sub(offset)
+        };
+        let access_addr = if p == 1 { writeback_addr } else { base };
+
+        if l == 1 {
+            let value = if h == 1 {
+                if s == 1 {
+                    sign_extend_half(mem.read16(access_addr))
+                } else {
+                    mem.read16(access_addr) as u32
+                }
+            } else {
+                sign_extend_byte(mem.read8(access_addr)) // LDRSB
+            };
+            self.regs.r[rd] = value;
+        } else {
+            mem.write16(access_addr, self.regs.r[rd] as u16); // STRH
+        }
+
+        if p == 0 || w == 1 {
+            self.regs.r[rn] = writeback_addr;
+        }
+    }
+
+    /// Block data transfer: LDM/STM (IA/IB/DA/DB via P/U).
+    fn exec_block_transfer(&mut self, mem: &mut Memory, instr: u32) {
+        let p = (instr >> 24) & 1;
+        let u = (instr >> 23) & 1;
+        let w = (instr >> 21) & 1;
+        let l = (instr >> 20) & 1;
+        let rn = ((instr >> 16) & 0xF) as usize;
+        let list = instr & 0xFFFF;
+
+        let base = self.regs.r[rn];
+        let mut addr = if p == 0 { base } else { if u == 1 { base + 4 } else { base - 4 } };
+
+        for reg in 0..16 {
+            if list & (1 << reg) != 0 {
+                if l == 1 {
+                    self.regs.r[reg] = mem.read32(addr);
+                } else {
+                    let value = if reg == 15 { self.regs.pc() + 4 } else { self.regs.r[reg] };
+                    mem.write32(addr, value);
+                }
+                addr = if u == 1 { addr + 4 } else { addr - 4 };
+            }
+        }
+
+        if w == 1 {
+            self.regs.r[rn] = addr;
+        }
+    }
+
+    fn exec_data_processing_class(&mut self, mem: &mut Memory, instr: u32) {
         if (instr & 0x0FC0_00F0) == 0x0000_0090 {
             self.exec_multiply(instr);
         } else if (instr & 0x0FBF_0FFF) == 0x010F_0000 {
             self.exec_mrs(instr);
         } else if (instr & 0x0FBF_0FF0) == 0x012F_0000 || (instr & 0x0FBF_0000) == 0x032F_0000 {
             self.exec_msr(instr);
+        } else if (instr & 0x0E00_0090) == 0x0000_0090 {
+            self.exec_halfword_transfer(mem, instr);
         } else {
             self.exec_data_processing(instr);
         }
@@ -555,21 +642,25 @@ impl Arm7tdmi {
             0x0A..=0x0B => {
                 if (instr >> 9) & 1 == 0 {
                     self.thumb_load_store_reg(mem, instr);
+                } else {
+                    self.thumb_load_store_halfword_reg(mem, instr);
                 }
-                // else: format 8 (halfword/signed) — later.
             }
             0x0C..=0x0F => self.thumb_load_store_imm(mem, instr),
+            0x10..=0x11 => self.thumb_load_store_halfword_imm(mem, instr),
             0x12..=0x13 => self.thumb_load_store_sp(mem, instr),
             0x14..=0x15 => self.thumb_load_address(instr),
-            0x16 => {
+            0x16..=0x17 => {
                 if (instr >> 10) & 1 == 0 {
-                    self.thumb_add_sp(instr); // else PUSH/POP — later
+                    self.thumb_add_sp(instr);
+                } else {
+                    self.thumb_push_pop(mem, instr);
                 }
             }
+            0x18..=0x19 => self.thumb_ldm_stm(mem, instr),
             0x1A..=0x1B => self.thumb_cond_branch(instr),
             0x1C..=0x1D => self.thumb_branch(instr),
-            // 0x10..0x11 (halfword immediate), 0x18..0x19 (LDM/STM),
-            // 0x1E..0x1F (BL): later.
+            // 0x1E..0x1F (BL): handled in System::step.
             _ => {}
         }
         1
@@ -628,6 +719,111 @@ impl Arm7tdmi {
         } else {
             mem.write32(addr, self.regs.r[rd]);
         }
+    }
+
+    /// Format 8: load/store halfword/signed with register offset (`0101 H S 1 Ro Rb Rd`).
+    fn thumb_load_store_halfword_reg(&mut self, mem: &mut Memory, instr: u32) {
+        let h = (instr >> 11) & 1; // halfword
+        let s = (instr >> 10) & 1; // signed
+        let addr = self.regs.r[((instr >> 3) & 0x7) as usize]
+            .wrapping_add(self.regs.r[((instr >> 6) & 0x7) as usize]);
+        let rd = (instr & 0x7) as usize;
+        if h | s == 1 {
+            // Load (LDRH / LDRSH / LDRSB).
+            self.regs.r[rd] = if h == 1 {
+                if s == 1 {
+                    sign_extend_half(mem.read16(addr))
+                } else {
+                    mem.read16(addr) as u32
+                }
+            } else {
+                sign_extend_byte(mem.read8(addr))
+            };
+        } else {
+            mem.write16(addr, self.regs.r[rd] as u16); // STRH
+        }
+    }
+
+    /// Format 10: load/store halfword with immediate offset (`1000 L offset5 Rb Rd`).
+    fn thumb_load_store_halfword_imm(&mut self, mem: &mut Memory, instr: u32) {
+        let l = (instr >> 11) & 1;
+        let addr = self.regs.r[((instr >> 3) & 0x7) as usize].wrapping_add(((instr >> 6) & 0x1F) << 1);
+        let rd = (instr & 0x7) as usize;
+        if l == 1 {
+            self.regs.r[rd] = mem.read16(addr) as u32;
+        } else {
+            mem.write16(addr, self.regs.r[rd] as u16);
+        }
+    }
+
+    /// Format 14: PUSH/POP (`1011 L 10 R Rlist`).
+    fn thumb_push_pop(&mut self, mem: &mut Memory, instr: u32) {
+        let l = (instr >> 11) & 1; // 0 = PUSH, 1 = POP
+        let r = (instr >> 8) & 1;  // include LR (push) / PC (pop)
+        let mut list = (instr & 0xFF) as u32;
+        if r == 1 {
+            list |= 1 << (if l == 0 { 14 } else { 15 });
+        }
+        let count = list.count_ones();
+
+        if l == 0 {
+            // PUSH: decrement SP, store registers ascending.
+            self.regs.r[13] = self.regs.r[13].wrapping_sub(count * 4);
+            let mut addr = self.regs.r[13];
+            for reg in 0..16 {
+                if list & (1 << reg) != 0 {
+                    mem.write32(addr, self.regs.r[reg]);
+                    addr += 4;
+                }
+            }
+        } else {
+            // POP: load ascending, then advance SP; PC sets Thumb state.
+            let mut addr = self.regs.r[13];
+            for reg in 0..16 {
+                if list & (1 << reg) != 0 {
+                    let value = mem.read32(addr);
+                    if reg == 15 {
+                        self.cpsr.thumb = value & 1 != 0;
+                        self.regs.set_pc(value & 0xFFFF_FFFE);
+                    } else {
+                        self.regs.r[reg] = value;
+                    }
+                    addr += 4;
+                }
+            }
+            self.regs.r[13] = addr;
+        }
+    }
+
+    /// Format 15: LDMIA/STMIA (`1100 L Rb Rlist`).
+    fn thumb_ldm_stm(&mut self, mem: &mut Memory, instr: u32) {
+        let l = (instr >> 11) & 1; // 0 = STMIA, 1 = LDMIA
+        let rb = ((instr >> 8) & 0x7) as usize;
+        let list = instr & 0xFF;
+        let mut addr = self.regs.r[rb];
+        for reg in 0..8 {
+            if list & (1 << reg) != 0 {
+                if l == 1 {
+                    self.regs.r[reg] = mem.read32(addr);
+                } else {
+                    mem.write32(addr, self.regs.r[reg]);
+                }
+                addr += 4;
+            }
+        }
+        if list & (1 << rb) == 0 {
+            self.regs.r[rb] = addr; // writeback
+        }
+    }
+
+    /// Format 19: BL (branch with link) — two 16-bit halfwords.
+    pub fn thumb_bl(&mut self, first: u16, second: u16) {
+        let off_high = ((first as u32) & 0x7FF) << 12;
+        let off_low = ((second as u32) & 0x7FF) << 1;
+        let offset = sign_extend(off_high | off_low, 23);
+        let pc = self.regs.pc();
+        self.regs.r[14] = pc | 1; // LR = next instruction, Thumb bit set
+        self.regs.set_pc((pc as i32).wrapping_add(offset) as u32);
     }
 
     /// Format 1: move shifted register (`000 op imm5 Rs Rd`).
@@ -1040,5 +1236,93 @@ mod tests {
         cpu.regs.r[1] = 0x0300_0000;
         cpu.step_thumb(&mut mem, 0x6848);
         assert_eq!(cpu.regs.r[0], 0xCAFE);
+    }
+
+    #[test]
+    fn arm_ldrh_halfword() {
+        // LDRH r0, [r1]  (0xE1D100B0)
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        mem.write16(0x0300_0000, 0xABCD);
+        cpu.regs.r[1] = 0x0300_0000;
+        cpu.step_arm(&mut mem, 0xE1D1_00B0);
+        assert_eq!(cpu.regs.r[0], 0x0000_ABCD);
+    }
+
+    #[test]
+    fn arm_ldmia() {
+        // LDMIA r0!, {r1, r2}  (0xE8B00006)
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        mem.write32(0x0300_0000, 0x1111_1111);
+        mem.write32(0x0300_0004, 0x2222_2222);
+        cpu.regs.r[0] = 0x0300_0000;
+        cpu.step_arm(&mut mem, 0xE8B0_0006);
+        assert_eq!(cpu.regs.r[1], 0x1111_1111);
+        assert_eq!(cpu.regs.r[2], 0x2222_2222);
+        assert_eq!(cpu.regs.r[0], 0x0300_0008); // writeback
+    }
+
+    #[test]
+    fn arm_stmia() {
+        // STMIA r0!, {r1, r2}  (0xE8A00006)
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        cpu.regs.r[0] = 0x0300_0000;
+        cpu.regs.r[1] = 0xAAAA_AAAA;
+        cpu.regs.r[2] = 0xBBBB_BBBB;
+        cpu.step_arm(&mut mem, 0xE8A0_0006);
+        assert_eq!(mem.read32(0x0300_0000), 0xAAAA_AAAA);
+        assert_eq!(mem.read32(0x0300_0004), 0xBBBB_BBBB);
+        assert_eq!(cpu.regs.r[0], 0x0300_0008);
+    }
+
+    #[test]
+    fn thumb_push_and_pop() {
+        // PUSH {r0, r1, lr}  (0xB503) then POP {r0, r1, pc}  (0xBD03)
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        cpu.regs.r[13] = 0x0300_7F00;
+        cpu.regs.r[0] = 0x11;
+        cpu.regs.r[1] = 0x22;
+        cpu.regs.r[14] = 0x0800_0001; // LR, Thumb bit set
+        cpu.step_thumb(&mut mem, 0xB503);
+        assert_eq!(cpu.regs.r[13], 0x0300_7EF4); // -12
+        assert_eq!(mem.read32(0x0300_7EF4), 0x11);
+        assert_eq!(mem.read32(0x0300_7EF8), 0x22);
+        assert_eq!(mem.read32(0x0300_7EFC), 0x0800_0001);
+
+        cpu.regs.r[0] = 0;
+        cpu.regs.r[1] = 0;
+        cpu.step_thumb(&mut mem, 0xBD03);
+        assert_eq!(cpu.regs.r[0], 0x11);
+        assert_eq!(cpu.regs.r[1], 0x22);
+        assert_eq!(cpu.regs.pc(), 0x0800_0000);
+        assert!(cpu.cpsr.thumb);
+        assert_eq!(cpu.regs.r[13], 0x0300_7F00);
+    }
+
+    #[test]
+    fn thumb_ldmia() {
+        // LDMIA r0!, {r1, r2}  (0xC806)
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        mem.write32(0x0300_0000, 0x1111_1111);
+        mem.write32(0x0300_0004, 0x2222_2222);
+        cpu.regs.r[0] = 0x0300_0000;
+        cpu.step_thumb(&mut mem, 0xC806);
+        assert_eq!(cpu.regs.r[1], 0x1111_1111);
+        assert_eq!(cpu.regs.r[2], 0x2222_2222);
+        assert_eq!(cpu.regs.r[0], 0x0300_0008);
+    }
+
+    #[test]
+    fn thumb_bl_branch_with_link() {
+        let mut cpu = Arm7tdmi::new();
+        cpu.regs.set_pc(0x0800_0008);
+        cpu.cpsr.thumb = true;
+        cpu.thumb_bl(0xF000, 0xF804); // BL +8
+        assert_eq!(cpu.regs.pc(), 0x0800_0010);
+        assert_eq!(cpu.regs.r[14], 0x0800_0009); // LR = pc | 1
     }
 }
