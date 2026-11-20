@@ -19,3 +19,4 @@ venv/
 # Node / browser runner
 node_modules/
 dist/
+.vercel
