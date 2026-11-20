@@ -232,7 +232,10 @@ fn add_with_carry(a: u32, b: u32, c: u32) -> (u32, bool, bool) {
     let sum = a as u64 + b as u64 + c as u64;
     let result = sum as u32;
     let carry = sum > 0xFFFF_FFFF;
-    let overflow = (sum as i64) < (i32::MIN as i64) || (sum as i64) > (i32::MAX as i64);
+    // Signed overflow (V) is computed on sign-extended operands, not the
+    // unsigned sum — e.g. -1 + 1 = 0 must not set V.
+    let signed = (a as i32 as i64) + (b as i32 as i64) + (c as i64);
+    let overflow = signed < (i32::MIN as i64) || signed > (i32::MAX as i64);
     (result, carry, overflow)
 }
 
@@ -241,7 +244,10 @@ fn sub_with_borrow(a: u32, b: u32, borrow_in: u32) -> (u32, bool, bool) {
     let diff = a as i64 - b as i64 - borrow_in as i64;
     let result = diff as u32;
     let carry = diff >= 0;
-    let overflow = diff < (i32::MIN as i64) || diff > (i32::MAX as i64);
+    // Signed overflow (V) is computed on sign-extended operands, not the
+    // unsigned difference — e.g. (-2) - 0 = -2 must not set V.
+    let signed = (a as i32 as i64) - (b as i32 as i64) - (borrow_in as i64);
+    let overflow = signed < (i32::MIN as i64) || signed > (i32::MAX as i64);
     (result, carry, overflow)
 }
 
@@ -1046,6 +1052,22 @@ mod tests {
         cpu.step_arm(&mut mem, dp(DP_SUB, true, 1, 0, 2));
         assert_eq!(cpu.regs.r[0], 0xFFFF_FFFE); // 3 - 5 = -2
         assert!(cpu.cpsr.n() && !cpu.cpsr.z() && !cpu.cpsr.c());
+    }
+
+    #[test]
+    fn sub_sets_signed_overflow_flag() {
+        let mut cpu = Arm7tdmi::new();
+        let mut mem = Memory::new();
+        // 0x80000000 - 1 wraps signed → V set.
+        cpu.regs.r[0] = 0x8000_0000;
+        cpu.step_arm(&mut mem, 0xE250_0001); // SUBS r0, r0, #1
+        assert_eq!(cpu.regs.r[0], 0x7FFF_FFFF);
+        assert!(cpu.cpsr.v());
+        // (-2) - 1 = -3 does not overflow → V clear.
+        cpu.regs.r[0] = 0xFFFF_FFFE;
+        cpu.step_arm(&mut mem, 0xE250_0001); // SUBS r0, r0, #1
+        assert_eq!(cpu.regs.r[0], 0xFFFF_FFFD);
+        assert!(!cpu.cpsr.v());
     }
 
     #[test]

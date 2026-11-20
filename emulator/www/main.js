@@ -1,51 +1,112 @@
 const WIDTH = 240, HEIGHT = 160, FB_SIZE = WIDTH * HEIGHT * 3;
 
-// Diagonal rainbow: color = x + y + t, scrolling every frame.
-// (BGR555 — bit 15 is ignored, so the palette cycles red → green → blue.)
+// A bouncing 24×24 red square: clear the screen, advance position (dx, dy),
+// bounce off the edges with predicated RSB, then redraw via nested loops and
+// MUL-based addressing. A real program with state, collision, and drawing.
 const DEMO_ROM = new Uint8Array([
   0x04, 0x34, 0xA0, 0xE3, // MOV r3, #0x04000000
   0x03, 0x40, 0xA0, 0xE3, // MOV r4, #3
   0xB0, 0x40, 0xC3, 0xE1, // STRH r4, [r3]   (mode 3)
-  0x00, 0x50, 0xA0, 0xE3, // MOV r5, #0      (t)
-  0x06, 0x04, 0xA0, 0xE3, // frame: MOV r0, #0x06000000
-  0x00, 0x10, 0xA0, 0xE3, // MOV r1, #0      (y)
-  0x01, 0x60, 0xA0, 0xE1, // row: MOV r6, r1
-  0x05, 0x60, 0x86, 0xE0, // ADD r6, r6, r5  (color = y + t)
-  0xF0, 0x20, 0xA0, 0xE3, // MOV r2, #240    (x)
-  0xB2, 0x60, 0xC0, 0xE0, // px: STRH r6, [r0], #2
-  0x01, 0x60, 0x86, 0xE2, // ADD r6, r6, #1  (color += 1 as x++)
+  0x64, 0x50, 0xA0, 0xE3, // MOV r5, #100    (x)
+  0x46, 0x60, 0xA0, 0xE3, // MOV r6, #70     (y)
+  0x02, 0x70, 0xA0, 0xE3, // MOV r7, #2      (dx)
+  0x01, 0x80, 0xA0, 0xE3, // MOV r8, #1      (dy)
+  0x18, 0x90, 0xA0, 0xE3, // MOV r9, #24     (size)
+  0x1F, 0xA0, 0xA0, 0xE3, // MOV r10, #0x1F  (red)
+  0x06, 0xC4, 0xA0, 0xE3, // MOV r12, #0x06000000
+  0xF0, 0xB0, 0xA0, 0xE3, // MOV r11, #0xF0  (240)
+  0x0B, 0xB0, 0x8B, 0xE0, // ADD r11, r11, r11 (480 = row stride)
+  0x0C, 0x00, 0xA0, 0xE1, // frame: MOV r0, r12
+  0x96, 0x1C, 0xA0, 0xE3, // MOV r1, #0x9600 (38400 px)
+  0x00, 0x20, 0xA0, 0xE3, // MOV r2, #0      (black)
+  0xB2, 0x20, 0xC0, 0xE0, // clear: STRH r2, [r0], #2
+  0x01, 0x10, 0x51, 0xE2, // SUBS r1, r1, #1
+  0xFC, 0xFF, 0xFF, 0x1A, // BNE clear
+  0x07, 0x40, 0x85, 0xE0, // ADD r4, r5, r7  (x + dx)
+  0x00, 0x00, 0x54, 0xE3, // CMP r4, #0
+  0x00, 0x70, 0x67, 0xB2, // RSBLT r7, r7, #0
+  0x07, 0x40, 0x85, 0xB0, // ADDLT r4, r5, r7
+  0x09, 0x40, 0x84, 0xE0, // ADD r4, r4, r9  (+ size)
+  0xF0, 0x00, 0x54, 0xE3, // CMP r4, #240
+  0x00, 0x70, 0x67, 0xC2, // RSBGT r7, r7, #0
+  0x07, 0x50, 0x85, 0xE0, // ADD r5, r5, r7  (x += dx)
+  0x08, 0x40, 0x86, 0xE0, // ADD r4, r6, r8  (y + dy)
+  0x00, 0x00, 0x54, 0xE3, // CMP r4, #0
+  0x00, 0x80, 0x68, 0xB2, // RSBLT r8, r8, #0
+  0x08, 0x40, 0x86, 0xB0, // ADDLT r4, r6, r8
+  0x09, 0x40, 0x84, 0xE0, // ADD r4, r4, r9  (+ size)
+  0xA0, 0x00, 0x54, 0xE3, // CMP r4, #160
+  0x00, 0x80, 0x68, 0xC2, // RSBGT r8, r8, #0
+  0x08, 0x60, 0x86, 0xE0, // ADD r6, r6, r8  (y += dy)
+  0x96, 0x0B, 0x00, 0xE0, // MUL r0, r6, r11 (y * 480)
+  0x0C, 0x00, 0x80, 0xE0, // ADD r0, r0, r12 (+ base)
+  0x85, 0x00, 0x80, 0xE0, // ADD r0, r0, r5, LSL #1 (+ x*2)
+  0x09, 0x20, 0xA0, 0xE1, // MOV r2, r9      (rows)
+  0x00, 0x10, 0xA0, 0xE1, // MOV r1, r0      (row addr)
+  0x09, 0x30, 0xA0, 0xE1, // row: MOV r3, r9 (cols)
+  0x01, 0x40, 0xA0, 0xE1, // MOV r4, r1      (pixel addr)
+  0xB2, 0xA0, 0xC4, 0xE0, // col: STRH r10, [r4], #2
+  0x01, 0x30, 0x53, 0xE2, // SUBS r3, r3, #1
+  0xFC, 0xFF, 0xFF, 0x1A, // BNE col
+  0x0B, 0x10, 0x81, 0xE0, // ADD r1, r1, r11 (+ 480)
   0x01, 0x20, 0x52, 0xE2, // SUBS r2, r2, #1
-  0xFB, 0xFF, 0xFF, 0x1A, // BNE px
-  0x01, 0x10, 0x81, 0xE2, // ADD r1, r1, #1
-  0xA0, 0x00, 0x51, 0xE3, // CMP r1, #160
-  0xF5, 0xFF, 0xFF, 0x1A, // BNE row
-  0x01, 0x50, 0x85, 0xE2, // ADD r5, r5, #1  (scroll)
-  0xF1, 0xFF, 0xFF, 0xEA, // B frame
+  0xF7, 0xFF, 0xFF, 0x1A, // BNE row
+  0xDB, 0xFF, 0xFF, 0xEA, // B frame
 ]);
 
-// One diagonal fill (160 rows) + frame advance = 154,564 instructions.
-const PER_FRAME = 154564;
+// One animation frame = clear + bounce + draw + loop = 117,073 instructions.
+const PER_FRAME = 117073;
 
 // The program, disassembled, so the register readout can be mapped to code.
 const PROGRAM = [
   [0x08000000, 'MOV r3, #0x04000000', 'DISPCNT register'],
   [0x08000004, 'MOV r4, #3',           'video mode 3 (bitmap)'],
   [0x08000008, 'STRH r4, [r3]',        'set mode 3'],
-  [0x0800000C, 'MOV r5, #0',           't = 0 (scroll offset)'],
-  [0x08000010, 'MOV r0, #0x06000000',  'frame: r0 = VRAM base'],
-  [0x08000014, 'MOV r1, #0',           'y = 0'],
-  [0x08000018, 'MOV r6, r1',           'row: color = y'],
-  [0x0800001C, 'ADD r6, r6, r5',       'color += t'],
-  [0x08000020, 'MOV r2, #240',         'x = 240'],
-  [0x08000024, 'STRH r6, [r0], #2',    'px: write pixel, r0 += 2'],
-  [0x08000028, 'ADD r6, r6, #1',       'color += 1 (next column)'],
-  [0x0800002C, 'SUBS r2, r2, #1',      'x--'],
-  [0x08000030, 'BNE 0x08000024',       'loop px'],
-  [0x08000034, 'ADD r1, r1, #1',       'y++'],
-  [0x08000038, 'CMP r1, #160',         'y == 160?'],
-  [0x0800003C, 'BNE 0x08000018',       'loop row'],
-  [0x08000040, 'ADD r5, r5, #1',       't++ (scroll)'],
-  [0x08000044, 'B 0x08000010',         'loop frame'],
+  [0x0800000C, 'MOV r5, #100',         'x = 100'],
+  [0x08000010, 'MOV r6, #70',          'y = 70'],
+  [0x08000014, 'MOV r7, #2',           'dx = 2'],
+  [0x08000018, 'MOV r8, #1',           'dy = 1'],
+  [0x0800001C, 'MOV r9, #24',          'size = 24'],
+  [0x08000020, 'MOV r10, #0x1F',       'color = red'],
+  [0x08000024, 'MOV r12, #0x06000000', 'VRAM base'],
+  [0x08000028, 'MOV r11, #0xF0',       '240'],
+  [0x0800002C, 'ADD r11, r11, r11',    '480 = row stride'],
+  [0x08000030, 'MOV r0, r12',          'frame: r0 = VRAM'],
+  [0x08000034, 'MOV r1, #0x9600',      '38400 px'],
+  [0x08000038, 'MOV r2, #0',           'black'],
+  [0x0800003C, 'STRH r2, [r0], #2',    'clear: write pixel'],
+  [0x08000040, 'SUBS r1, r1, #1',      'pixels--'],
+  [0x08000044, 'BNE 0x0800003C',       'loop clear'],
+  [0x08000048, 'ADD r4, r5, r7',       'x + dx'],
+  [0x0800004C, 'CMP r4, #0',           'hit left edge?'],
+  [0x08000050, 'RSBLT r7, r7, #0',     'if so: dx = -dx'],
+  [0x08000054, 'ADDLT r4, r5, r7',     'recompute x + dx'],
+  [0x08000058, 'ADD r4, r4, r9',       'x + dx + size'],
+  [0x0800005C, 'CMP r4, #240',         'hit right edge?'],
+  [0x08000060, 'RSBGT r7, r7, #0',     'if so: dx = -dx'],
+  [0x08000064, 'ADD r5, r5, r7',       'x += dx'],
+  [0x08000068, 'ADD r4, r6, r8',       'y + dy'],
+  [0x0800006C, 'CMP r4, #0',           'hit top edge?'],
+  [0x08000070, 'RSBLT r8, r8, #0',     'if so: dy = -dy'],
+  [0x08000074, 'ADDLT r4, r6, r8',     'recompute y + dy'],
+  [0x08000078, 'ADD r4, r4, r9',       'y + dy + size'],
+  [0x0800007C, 'CMP r4, #160',         'hit bottom edge?'],
+  [0x08000080, 'RSBGT r8, r8, #0',     'if so: dy = -dy'],
+  [0x08000084, 'ADD r6, r6, r8',       'y += dy'],
+  [0x08000088, 'MUL r0, r6, r11',      'y * 480'],
+  [0x0800008C, 'ADD r0, r0, r12',      '+ VRAM base'],
+  [0x08000090, 'ADD r0, r0, r5, LSL #1', '+ x*2 (top-left)'],
+  [0x08000094, 'MOV r2, r9',           'rows = size'],
+  [0x08000098, 'MOV r1, r0',           'row addr'],
+  [0x0800009C, 'MOV r3, r9',           'row: cols = size'],
+  [0x080000A0, 'MOV r4, r1',           'pixel addr'],
+  [0x080000A4, 'STRH r10, [r4], #2',   'col: write red'],
+  [0x080000A8, 'SUBS r3, r3, #1',      'cols--'],
+  [0x080000AC, 'BNE 0x080000A4',       'loop col'],
+  [0x080000B0, 'ADD r1, r1, r11',      'row += 480'],
+  [0x080000B4, 'SUBS r2, r2, #1',      'rows--'],
+  [0x080000B8, 'BNE 0x0800009C',       'loop row'],
+  [0x080000BC, 'B 0x08000030',         'loop frame'],
 ];
 
 const REG_NAMES = ['r0','r1','r2','r3','r4','r5','r6','r7','r8','r9','r10','r11','r12','sp','lr','pc'];
