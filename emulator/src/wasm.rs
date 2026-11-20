@@ -65,3 +65,15 @@ pub unsafe extern "C" fn emu_render(emu: *mut System, fb: *mut u8) {
 pub extern "C" fn emu_fb_size() -> usize {
     FB_SIZE
 }
+
+/// Read register `reg` (0..15). r15 is the program counter (r15 = address + 8).
+#[no_mangle]
+pub unsafe extern "C" fn emu_get_reg(emu: *mut System, reg: u32) -> u32 {
+    (*emu).cpu.regs.r[(reg & 0xF) as usize]
+}
+
+/// Read the CPSR (N/Z/C/V flags + mode + Thumb/interrupt bits).
+#[no_mangle]
+pub unsafe extern "C" fn emu_get_cpsr(emu: *mut System) -> u32 {
+    (*emu).cpu.cpsr.pack()
+}

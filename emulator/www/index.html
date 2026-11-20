@@ -1,19 +1,122 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>GBA Emulator — demo</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GBA Eval — ARM7TDMI emulator</title>
   <style>
-    body { background: #111; color: #eee; font-family: sans-serif; display: flex; flex-direction: column; align-items: center; margin: 2rem; }
-    canvas { image-rendering: pixelated; border: 1px solid #333; }
-    code { background: #222; padding: 0.2rem 0.5rem; border-radius: 4px; }
+    :root {
+      --bg: #0b0d10;
+      --panel: #12151a;
+      --border: #242a33;
+      --text: #e7e9ec;
+      --muted: #8b93a1;
+      --accent: #a78bfa;
+      --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+    .wrap { max-width: 900px; margin: 0 auto; padding: 3rem 1.5rem 4rem; }
+    header { margin-bottom: 2rem; }
+    h1 { font-size: 1.6rem; margin: 0 0 0.4rem; letter-spacing: -0.01em; }
+    h1 .dot { color: var(--accent); }
+    .tagline { color: var(--muted); margin: 0; max-width: 58ch; line-height: 1.55; }
+    main { display: flex; gap: 1.5rem; align-items: flex-start; flex-wrap: wrap; }
+    .screen-panel { flex: 1 1 340px; min-width: 300px; }
+    .side-panel { flex: 1 1 340px; min-width: 300px; display: flex; flex-direction: column; gap: 1.25rem; }
+    .screen-frame {
+      background: #000;
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 10px;
+      box-shadow: 0 18px 40px -18px rgba(0,0,0,0.8), inset 0 0 0 1px rgba(255,255,255,0.02);
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: auto;
+      image-rendering: pixelated;
+      border-radius: 4px;
+    }
+    .stats { display: flex; gap: 0.5rem; margin-top: 0.75rem; flex-wrap: wrap; }
+    .stat {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.4rem 0.75rem;
+      font-size: 0.8rem;
+      color: var(--muted);
+    }
+    .stat strong { color: var(--text); font-family: var(--mono); font-weight: 600; }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem;
+    }
+    .card h2 {
+      font-size: 0.68rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin: 0 0 0.6rem;
+      font-weight: 600;
+    }
+    pre {
+      margin: 0;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      line-height: 1.5;
+      color: var(--text);
+      white-space: pre;
+      overflow-x: auto;
+    }
+    #regs { color: var(--text); }
+    #program { color: var(--muted); }
+    footer { margin-top: 2.25rem; color: var(--muted); font-size: 0.8rem; line-height: 1.6; }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
-  <h1>GBA Emulator</h1>
-  <p>An ARM7TDMI emulator running a tiny ROM that sets <code>mode 3</code> and fills the framebuffer with a scrolling gradient — rendered in WebAssembly.</p>
-  <canvas id="screen"></canvas>
-  <p>CPU frames: <strong id="fps">—</strong>/s</p>
+  <div class="wrap">
+    <header>
+      <h1>GBA Eval<span class="dot">.</span></h1>
+      <p class="tagline">An ARM7TDMI emulator executing a hand-encoded ARM program that paints a scrolling rainbow — running live in WebAssembly. Watch the registers move.</p>
+    </header>
+    <main>
+      <section class="screen-panel">
+        <div class="screen-frame"><canvas id="screen" width="240" height="160"></canvas></div>
+        <div class="stats">
+          <div class="stat"><strong id="fps">—</strong> fps</div>
+          <div class="stat"><strong id="instr">—</strong> instr</div>
+          <div class="stat">mode <strong>3</strong></div>
+          <div class="stat">size <strong>240×160</strong></div>
+        </div>
+      </section>
+      <section class="side-panel">
+        <div class="card">
+          <h2>CPU registers</h2>
+          <pre id="regs">…</pre>
+        </div>
+        <div class="card">
+          <h2>Program · ARM</h2>
+          <pre id="program">…</pre>
+        </div>
+      </section>
+    </main>
+    <footer>
+      ARM7TDMI core · full memory map · PPU bitmap modes · SSIM grader ·
+      <a href="https://github.com/jielimanyili/gba-eval">github.com/jielimanyili/gba-eval</a>
+    </footer>
+  </div>
   <script src="main.js"></script>
 </body>
 </html>
+

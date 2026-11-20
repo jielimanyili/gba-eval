@@ -140,27 +140,28 @@ mod tests {
     }
 
     #[test]
-    fn gradient_demo_animates() {
+    fn demo_scrolling_gradient_animates() {
         let mut sys = System::new();
-        // Animated vertical gradient: color = row + offset, scrolling.
-        let program: [u32; 17] = [
+        // Diagonal rainbow: color = x + y + t, scrolling each frame.
+        let program: [u32; 18] = [
             0xE3A0_3404, // MOV r3, #0x04000000
             0xE3A0_4003, // MOV r4, #3
             0xE1C3_40B0, // STRH r4, [r3]   (mode 3)
-            0xE3A0_5000, // MOV r5, #0      (offset)
+            0xE3A0_5000, // MOV r5, #0      (t)
             0xE3A0_0406, // frame: MOV r0, #0x06000000
             0xE3A0_1000, // MOV r1, #0      (y)
             0xE1A0_6001, // row: MOV r6, r1
-            0xE086_6005, // ADD r6, r6, r5  (color = y + offset)
+            0xE086_6005, // ADD r6, r6, r5  (color = y + t)
             0xE3A0_20F0, // MOV r2, #240    (x)
             0xE0C0_60B2, // px: STRH r6, [r0], #2
+            0xE286_6001, // ADD r6, r6, #1  (color += 1 as x++)
             0xE252_2001, // SUBS r2, r2, #1
-            0x1AFF_FFFC, // BNE px
+            0x1AFF_FFFB, // BNE px
             0xE281_1001, // ADD r1, r1, #1
             0xE351_00A0, // CMP r1, #160
-            0x1AFF_FFF6, // BNE row
+            0x1AFF_FFF5, // BNE row
             0xE285_5001, // ADD r5, r5, #1  (scroll)
-            0xEAFF_FFF2, // B frame
+            0xEAFF_FFF1, // B frame
         ];
         let mut rom = Vec::new();
         for w in &program {
@@ -169,19 +170,22 @@ mod tests {
         sys.load_rom(&rom);
         sys.cpu.regs.set_pc(0x0800_0008);
 
-        // Setup (4) + one full frame (116164 instructions) → offset 0.
-        for _ in 0..(4 + 116_164) {
+        // Setup (4) + one full frame (154564 instructions) → t = 0.
+        for _ in 0..(4 + 154_564) {
             sys.step();
         }
         let mut fb = vec![0u8; 240 * 160 * 3];
         sys.render_frame(&mut fb);
-        assert_eq!(&fb[0..3], &[0, 0, 0]); // top row = offset 0
+        assert_eq!(&fb[0..3], &[0, 0, 0]); // (0,0) = x+y+t = 0
 
-        // One more frame → offset 1.
-        for _ in 0..116_164 {
+        // One more frame → t = 1.
+        for _ in 0..154_564 {
             sys.step();
         }
         sys.render_frame(&mut fb);
-        assert_eq!(&fb[0..3], &[8, 0, 0]); // top row = offset 1 (R=1)
+        assert_eq!(&fb[0..3], &[8, 0, 0]); // (0,0) = 1 → R=1
+        // Diagonal: color increases along x+y.
+        assert_eq!(&fb[1 * 3..1 * 3 + 3], &[16, 0, 0]); // (0,1) → R=2
+        assert_eq!(&fb[(1 * 240 + 1) * 3..(1 * 240 + 1) * 3 + 3], &[24, 0, 0]); // (1,1) → R=3
     }
 }
