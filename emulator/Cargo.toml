@@ -1,0 +1,8 @@
+[package]
+name = "gba-emulator"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Dependency-light by design (ADR-001) — the systems work should be visible,
+# not hidden behind a framework.
