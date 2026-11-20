@@ -2,10 +2,12 @@
 
 use crate::cpu::Arm7tdmi;
 use crate::memory::Memory;
+use crate::ppu::Ppu;
 
 pub struct System {
     pub cpu: Arm7tdmi,
     pub mem: Memory,
+    pub ppu: Ppu,
 }
 
 impl System {
@@ -13,11 +15,17 @@ impl System {
         Self {
             cpu: Arm7tdmi::new(),
             mem: Memory::new(),
+            ppu: Ppu::new(),
         }
     }
 
     pub fn load_rom(&mut self, bytes: &[u8]) {
         self.mem.load_rom(bytes);
+    }
+
+    /// Render the current frame into an RGB framebuffer (WIDTH*HEIGHT*3 bytes).
+    pub fn render_frame(&self, fb: &mut [u8]) {
+        self.ppu.render(&self.mem, fb);
     }
 
     /// Execute one instruction (ARM or Thumb, per CPSR.T).
