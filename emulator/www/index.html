@@ -78,7 +78,22 @@
       overflow-x: auto;
     }
     #regs { color: var(--text); }
-    #program { color: var(--muted); }
+    .listing { font-family: var(--mono); font-size: 0.72rem; line-height: 1.7; }
+    .instr { display: flex; gap: 0.9rem; padding: 0 0.4rem; border-radius: 4px; }
+    .instr .addr { color: var(--muted); min-width: 8.2ch; }
+    .instr .mnem { color: var(--text); min-width: 19ch; }
+    .instr .note { color: var(--muted); opacity: 0.8; }
+    .instr.current { background: rgba(167, 139, 250, 0.14); }
+    .instr.current .mnem { color: var(--accent); }
+    .controls { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.9rem; }
+    .controls .hint { color: var(--muted); font-size: 0.72rem; }
+    button {
+      background: var(--panel); color: var(--text);
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 0.42rem 0.95rem; font-size: 0.8rem; font-family: inherit; cursor: pointer;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button:disabled { opacity: 0.4; cursor: default; }
     footer { margin-top: 2.25rem; color: var(--muted); font-size: 0.8rem; line-height: 1.6; }
     footer a { color: var(--accent); text-decoration: none; }
     footer a:hover { text-decoration: underline; }
@@ -96,8 +111,13 @@
         <div class="stats">
           <div class="stat"><strong id="fps">—</strong> fps</div>
           <div class="stat"><strong id="instr">—</strong> instr</div>
+          <div class="stat">pc <strong id="pc">—</strong></div>
           <div class="stat">mode <strong>3</strong></div>
-          <div class="stat">size <strong>240×160</strong></div>
+        </div>
+        <div class="controls">
+          <button id="toggle">Pause</button>
+          <button id="step" disabled>Step ▸</button>
+          <span class="hint">space · pause&ensp;→ · step</span>
         </div>
       </section>
       <section class="side-panel">
@@ -107,7 +127,7 @@
         </div>
         <div class="card">
           <h2>Program · ARM</h2>
-          <pre id="program">…</pre>
+          <div id="program" class="listing"></div>
         </div>
       </section>
     </main>

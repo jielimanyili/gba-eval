@@ -75,23 +75,39 @@ async function main() {
 
   const fpsEl = document.getElementById('fps');
   const instrEl = document.getElementById('instr');
+  const pcEl = document.getElementById('pc');
   const regsEl = document.getElementById('regs');
 
-  // Static program listing.
-  document.getElementById('program').textContent = PROGRAM.map(
-    ([a, asm, note]) => `0x${a.toString(16).padStart(8, '0')}  ${asm.padEnd(20)} ${note}`
-  ).join('\n');
+  // Build the disassembly listing as highlightable rows.
+  const programEl = document.getElementById('program');
+  const rows = new Map();
+  for (const [addr, asm, note] of PROGRAM) {
+    const row = document.createElement('div');
+    row.className = 'instr';
+    const a = document.createElement('span'); a.className = 'addr';
+    a.textContent = '0x' + addr.toString(16).padStart(8, '0');
+    const m = document.createElement('span'); m.className = 'mnem'; m.textContent = asm;
+    const n = document.createElement('span'); n.className = 'note'; n.textContent = note;
+    row.append(a, m, n);
+    programEl.appendChild(row);
+    rows.set(addr, row);
+  }
 
-  let frames = 0;
+  const toggleBtn = document.getElementById('toggle');
+  const stepBtn = document.getElementById('step');
+  let running = true;
   let totalInstr = 0;
+  let frames = 0;
   let lastTime = performance.now();
 
-  function render() {
-    // Execute exactly one frame's worth of instructions.
-    w.emu_step(emu, PER_FRAME);
-    w.emu_render(emu, fbPtr);
-    totalInstr += PER_FRAME;
+  function highlight(addr) {
+    for (const row of rows.values()) row.classList.remove('current');
+    const row = rows.get(addr);
+    if (row) row.classList.add('current');
+  }
 
+  function draw() {
+    w.emu_render(emu, fbPtr);
     for (let i = 0; i < WIDTH * HEIGHT; i++) {
       img.data[i * 4 + 0] = fb[i * 3 + 0];
       img.data[i * 4 + 1] = fb[i * 3 + 1];
@@ -99,34 +115,68 @@ async function main() {
       img.data[i * 4 + 3] = 255;
     }
     ctx.putImageData(img, 0, 0);
+  }
+
+  function update() {
+    draw();
 
     // Live register readout (two columns).
     const cols = [[], []];
     for (let r = 0; r < 16; r++) {
-      const name = REG_NAMES[r];
       const val = '0x' + (w.emu_get_reg(emu, r) >>> 0).toString(16).padStart(8, '0');
-      cols[r < 8 ? 0 : 1].push(`${name.padEnd(3)} ${val}`);
+      cols[r < 8 ? 0 : 1].push(`${REG_NAMES[r].padEnd(3)} ${val}`);
     }
     const cpsr = w.emu_get_cpsr(emu) >>> 0;
-    const flag = (b) => (cpsr & (1 << b)) ? 1 : 0;
-    const nzcv = `${flag(31) ? 'N' : '-'}${flag(30) ? 'Z' : '-'}${flag(29) ? 'C' : '-'}${flag(28) ? 'V' : '-'}`;
-    const ift = `${flag(7) ? 'I' : '-'}${flag(6) ? 'F' : '-'}${flag(5) ? 'T' : '-'}`;
+    const f = (b) => (cpsr & (1 << b)) ? 1 : 0;
+    const nzcv = `${f(31) ? 'N' : '-'}${f(30) ? 'Z' : '-'}${f(29) ? 'C' : '-'}${f(28) ? 'V' : '-'}`;
+    const ift = `${f(7) ? 'I' : '-'}${f(6) ? 'F' : '-'}${f(5) ? 'T' : '-'}`;
     let lines = [];
     for (let i = 0; i < 8; i++) lines.push(`${cols[0][i]}   ${cols[1][i]}`);
     regsEl.textContent = lines.join('\n') + `\nCPSR ${nzcv}  ${ift}`;
 
-    frames++;
+    // Current instruction (ARM: next fetch address = r15 - 8).
+    const addr = (w.emu_get_reg(emu, 15) >>> 0) - 8;
+    pcEl.textContent = '0x' + addr.toString(16).padStart(8, '0');
+    highlight(addr);
+  }
+
+  function stepN(n) {
+    w.emu_step(emu, n);
+    totalInstr += n;
+    update();
+    instrEl.textContent = (totalInstr / 1e6).toFixed(1) + 'M';
+  }
+
+  function setRunning(v) {
+    running = v;
+    toggleBtn.textContent = running ? 'Pause' : 'Run';
+    stepBtn.disabled = running;
+    if (!running) fpsEl.textContent = '—';
+  }
+
+  toggleBtn.addEventListener('click', () => setRunning(!running));
+  stepBtn.addEventListener('click', () => { setRunning(false); stepN(1); });
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); setRunning(!running); }
+    else if (e.code === 'ArrowRight' && !running) stepN(1);
+  });
+
+  function tick() {
+    if (running) {
+      stepN(PER_FRAME);
+      frames++;
+    }
     const now = performance.now();
     if (now - lastTime >= 1000) {
       fpsEl.textContent = frames;
-      instrEl.textContent = (totalInstr / 1e6).toFixed(1) + 'M';
       frames = 0;
       lastTime = now;
     }
-    requestAnimationFrame(render);
+    requestAnimationFrame(tick);
   }
 
-  requestAnimationFrame(render);
+  update(); // initial state: mode 3 set, black screen, PC at frame
+  requestAnimationFrame(tick);
 }
 
 main();
