@@ -361,7 +361,8 @@ impl Arm7tdmi {
                 mem.read32(access_addr)
             };
             if rd == 15 {
-                self.regs.set_pc(value & 0xFFFF_FFFC);
+                // r15 = address + 8 (ARM); fetch reads r15 - 8 → store target + 8.
+                self.regs.set_pc((value & 0xFFFF_FFFC).wrapping_add(8));
             } else {
                 self.regs.r[rd] = value;
             }
@@ -478,7 +479,9 @@ impl Arm7tdmi {
         if link {
             self.regs.r[14] = pc - 4; // LR = next instruction
         }
-        self.regs.set_pc((pc as i32).wrapping_add(offset) as u32);
+        // r15 = address + 8 (ARM); fetch reads r15 - 8 → store target + 8.
+        self.regs
+            .set_pc((pc as i32).wrapping_add(offset).wrapping_add(8) as u32);
     }
 
     fn exec_multiply(&mut self, instr: u32) {
@@ -600,7 +603,8 @@ impl Arm7tdmi {
 
         if !is_test {
             if rd == 15 {
-                self.regs.set_pc(result & 0xFFFF_FFFE);
+                // r15 = address + 8 (ARM); fetch reads r15 - 8 → store target + 8.
+                self.regs.set_pc((result & 0xFFFF_FFFE).wrapping_add(8));
             } else {
                 self.regs.r[rd] = result;
             }
@@ -784,7 +788,8 @@ impl Arm7tdmi {
                     let value = mem.read32(addr);
                     if reg == 15 {
                         self.cpsr.thumb = value & 1 != 0;
-                        self.regs.set_pc(value & 0xFFFF_FFFE);
+                        let base = if self.cpsr.thumb { 4 } else { 8 };
+                        self.regs.set_pc((value & 0xFFFF_FFFE).wrapping_add(base));
                     } else {
                         self.regs.r[reg] = value;
                     }
@@ -823,7 +828,9 @@ impl Arm7tdmi {
         let offset = sign_extend(off_high | off_low, 23);
         let pc = self.regs.pc();
         self.regs.r[14] = pc | 1; // LR = next instruction, Thumb bit set
-        self.regs.set_pc((pc as i32).wrapping_add(offset) as u32);
+        // r15 = address + 4 (Thumb); fetch reads r15 - 4 → store target + 4.
+        self.regs
+            .set_pc((pc as i32).wrapping_add(offset).wrapping_add(4) as u32);
     }
 
     /// Format 1: move shifted register (`000 op imm5 Rs Rd`).
@@ -930,7 +937,8 @@ impl Arm7tdmi {
             3 => {
                 let target = self.regs.r[rs];
                 self.cpsr.thumb = target & 1 != 0;
-                self.regs.set_pc(target & 0xFFFF_FFFE);
+                let base = if self.cpsr.thumb { 4 } else { 8 };
+                self.regs.set_pc((target & 0xFFFF_FFFE).wrapping_add(base));
             }
             _ => unreachable!(),
         }
@@ -970,7 +978,7 @@ impl Arm7tdmi {
         if condition_passes(cond, self.cpsr.flags) {
             let offset = sign_extend(instr & 0xFF, 8);
             let target = (self.regs.pc() as i32).wrapping_add(offset << 1) as u32;
-            self.regs.set_pc(target);
+            self.regs.set_pc(target.wrapping_add(4));
         }
     }
 
@@ -978,7 +986,7 @@ impl Arm7tdmi {
     fn thumb_branch(&mut self, instr: u32) {
         let offset = sign_extend(instr & 0x7FF, 11);
         let target = (self.regs.pc() as i32).wrapping_add(offset << 1) as u32;
-        self.regs.set_pc(target);
+        self.regs.set_pc(target.wrapping_add(4));
     }
 }
 
@@ -1134,7 +1142,7 @@ mod tests {
         cpu.regs.r[1] = 0x0800_0001; // bit0 = 1 → Thumb state
         cpu.cpsr.thumb = false;
         cpu.step_thumb(&mut mem, 0x4708);
-        assert_eq!(cpu.regs.pc(), 0x0800_0000);
+        assert_eq!(cpu.regs.pc(), 0x0800_0004); // target + 4 (Thumb)
         assert!(cpu.cpsr.thumb);
     }
 
@@ -1146,7 +1154,7 @@ mod tests {
         cpu.regs.set_pc(0x100);
         cpu.cpsr.flags = 1 << 30; // Z set
         cpu.step_thumb(&mut mem, 0xD004);
-        assert_eq!(cpu.regs.pc(), 0x108); // 0x100 + (4 << 1)
+        assert_eq!(cpu.regs.pc(), 0x10C); // (0x100 + 8) + 4
     }
 
     #[test]
@@ -1156,7 +1164,7 @@ mod tests {
         let mut mem = Memory::new();
         cpu.regs.set_pc(0x100);
         cpu.step_arm(&mut mem, 0xEB00_0002);
-        assert_eq!(cpu.regs.pc(), 0x108);
+        assert_eq!(cpu.regs.pc(), 0x110); // (0x100 + 8) + 8
         assert_eq!(cpu.regs.r[14], 0xFC); // LR = pc - 4
     }
 
@@ -1297,7 +1305,7 @@ mod tests {
         cpu.step_thumb(&mut mem, 0xBD03);
         assert_eq!(cpu.regs.r[0], 0x11);
         assert_eq!(cpu.regs.r[1], 0x22);
-        assert_eq!(cpu.regs.pc(), 0x0800_0000);
+        assert_eq!(cpu.regs.pc(), 0x0800_0004); // target + 4 (Thumb)
         assert!(cpu.cpsr.thumb);
         assert_eq!(cpu.regs.r[13], 0x0300_7F00);
     }
@@ -1322,7 +1330,7 @@ mod tests {
         cpu.regs.set_pc(0x0800_0008);
         cpu.cpsr.thumb = true;
         cpu.thumb_bl(0xF000, 0xF804); // BL +8
-        assert_eq!(cpu.regs.pc(), 0x0800_0010);
+        assert_eq!(cpu.regs.pc(), 0x0800_0014); // (0x08000008 + 8) + 4
         assert_eq!(cpu.regs.r[14], 0x0800_0009); // LR = pc | 1
     }
 }

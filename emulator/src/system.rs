@@ -138,4 +138,50 @@ mod tests {
         let last = (159 * 240 + 239) * 3;
         assert_eq!(&fb[last..last + 3], &[255, 0, 0]); // last pixel
     }
+
+    #[test]
+    fn gradient_demo_animates() {
+        let mut sys = System::new();
+        // Animated vertical gradient: color = row + offset, scrolling.
+        let program: [u32; 17] = [
+            0xE3A0_3404, // MOV r3, #0x04000000
+            0xE3A0_4003, // MOV r4, #3
+            0xE1C3_40B0, // STRH r4, [r3]   (mode 3)
+            0xE3A0_5000, // MOV r5, #0      (offset)
+            0xE3A0_0406, // frame: MOV r0, #0x06000000
+            0xE3A0_1000, // MOV r1, #0      (y)
+            0xE1A0_6001, // row: MOV r6, r1
+            0xE086_6005, // ADD r6, r6, r5  (color = y + offset)
+            0xE3A0_20F0, // MOV r2, #240    (x)
+            0xE0C0_60B2, // px: STRH r6, [r0], #2
+            0xE252_2001, // SUBS r2, r2, #1
+            0x1AFF_FFFC, // BNE px
+            0xE281_1001, // ADD r1, r1, #1
+            0xE351_00A0, // CMP r1, #160
+            0x1AFF_FFF6, // BNE row
+            0xE285_5001, // ADD r5, r5, #1  (scroll)
+            0xEAFF_FFF2, // B frame
+        ];
+        let mut rom = Vec::new();
+        for w in &program {
+            rom.extend_from_slice(&w.to_le_bytes());
+        }
+        sys.load_rom(&rom);
+        sys.cpu.regs.set_pc(0x0800_0008);
+
+        // Setup (4) + one full frame (116164 instructions) → offset 0.
+        for _ in 0..(4 + 116_164) {
+            sys.step();
+        }
+        let mut fb = vec![0u8; 240 * 160 * 3];
+        sys.render_frame(&mut fb);
+        assert_eq!(&fb[0..3], &[0, 0, 0]); // top row = offset 0
+
+        // One more frame → offset 1.
+        for _ in 0..116_164 {
+            sys.step();
+        }
+        sys.render_frame(&mut fb);
+        assert_eq!(&fb[0..3], &[8, 0, 0]); // top row = offset 1 (R=1)
+    }
 }
